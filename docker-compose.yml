@@ -1,0 +1,33 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: certification-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: certification123
+      POSTGRES_DB: certification_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d
+    restart: unless-stopped
+
+  # Interfaz web para administrar PostgreSQL (opcional pero útil)
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: certification-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@certification.com
+      PGADMIN_DEFAULT_PASSWORD: admin123
+    ports:
+      - "8080:80"
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
