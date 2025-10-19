@@ -22,25 +22,10 @@ const app = express();
 
 // Security middleware
 app.use(helmet());
-// CORS configuration
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:5173')
-  .split(',')
-  .map(origin => origin.trim());
-
-console.log('Allowed CORS origins:', allowedOrigins); // Para debugging
-
 app.use(cors({
-  origin: allowedOrigins,
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-  exposedHeaders: ['Content-Range', 'X-Content-Range'],
-  maxAge: 600,
-  optionsSuccessStatus: 200 // Para navegadores legacy
+  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+  credentials: true
 }));
-
-// Manejar OPTIONS requests explícitamente
-app.options('*', cors());
 // Rate limiting
 
 const limiter = rateLimit({
