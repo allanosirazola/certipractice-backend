@@ -22,11 +22,29 @@ const app = express();
 
 // Security middleware
 app.use(helmet());
-app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
-  credentials: true
-}));
+// CORS configuration
+const allowedOrigins = process.env.ALLOWED_ORIGINS 
+  ? process.env.ALLOWED_ORIGINS.split(',').map(origin => origin.trim())
+  : ['http://localhost:5173', 'http://localhost:3000'];
 
+app.use(cors({
+  origin: function (origin, callback) {
+    // Permitir requests sin origin (como Postman, curl, apps móviles)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      logger.warn(`CORS blocked request from origin: ${origin}`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  exposedHeaders: ['Content-Range', 'X-Content-Range'],
+  maxAge: 600 // 10 minutes
+}));
 // Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
