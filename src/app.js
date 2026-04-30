@@ -9,7 +9,7 @@ const slowDown = require('express-slow-down');
 const config = require('./config/config');
 const logger = require('./utils/logger');
 const errorHandler = require('./middleware/errorHandler');
-const notFound = require('./middleware/notFound');
+const { notFoundHandler } = require('./middleware/errorHandler');
 
 // Routes
 const authRoutes = require('./routes/auth');
@@ -17,53 +17,115 @@ const questionRoutes = require('./routes/questions');
 const examRoutes = require('./routes/exams');
 const userRoutes = require('./routes/users');
 const statsRoutes = require('./routes/stats');
+const healthRoutes = require('./routes/health');
 
 const app = express();
 
-// Security middleware
-app.use(helmet());
-app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
-  credentials: true
-}));
-// Rate limiting
+// Trust proxy (for correct IP in rate limiting behind reverse proxy)
+app.set('trust proxy', 1);
 
+// Security middleware
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: ["'self'"],
+      imgSrc: ["'self'", 'data:', 'https:'],
+    },
+  },
+  crossOriginEmbedderPolicy: false,
+}));
+
+// CORS configuration
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, Postman, etc.)
+    if (!origin) return callback(null, true);
+    
+    const allowedOrigins = config.allowedOrigins || [
+      'http://localhost:5173',
+      'http://localhost:3000',
+      process.env.FRONTEND_URL,
+    ].filter(Boolean);
+    
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      logger.warn('CORS blocked request from:', origin);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Session-ID', 'X-Request-ID'],
+  exposedHeaders: ['X-Session-Id', 'X-New-Token', 'X-Total-Count'],
+}));
+
+// Rate limiting
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limit each IP to 100 requests per windowMs
-  message: 'Too many requests from this IP, please try again later.',
+  windowMs: config.rateLimit?.windowMs || 15 * 60 * 1000,
+  max: config.rateLimit?.max || 100,
+  message: {
+    success: false,
+    error: {
+      message: 'Too many requests, please try again later.',
+      code: 'RATE_LIMIT_EXCEEDED',
+    },
+  },
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => req.path.startsWith('/health'),
 });
 
 const speedLimiter = slowDown({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  delayAfter: 50, // allow 50 requests per 15 minutes at full speed
-  delayMs: 500 // slow down subsequent requests by 500ms per request
+  windowMs: 15 * 60 * 1000,
+  delayAfter: 50,
+  delayMs: (hits) => hits * 100,
+  maxDelayMs: 2000,
 });
 
 app.use(limiter);
 app.use(speedLimiter);
 
 // Body parsing middleware
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ 
+  limit: '10mb',
+  verify: (req, res, buf) => {
+    req.rawBody = buf;
+  },
+}));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Compression
-app.use(compression());
+app.use(compression({
+  filter: (req, res) => {
+    if (req.headers['x-no-compression']) {
+      return false;
+    }
+    return compression.filter(req, res);
+  },
+  level: 6,
+}));
+
+// Request ID middleware
+app.use((req, res, next) => {
+  req.id = req.headers['x-request-id'] || require('uuid').v4();
+  res.setHeader('X-Request-ID', req.id);
+  next();
+});
 
 // Logging
-app.use(morgan('combined', { stream: { write: message => logger.info(message.trim()) } }));
+const morganFormat = process.env.NODE_ENV === 'production' ? 'combined' : 'dev';
+app.use(morgan(morganFormat, { 
+  stream: { 
+    write: (message) => logger.http(message.trim()) 
+  },
+  skip: (req) => req.path === '/health' || req.path === '/health/live',
+}));
 
-// Health check
-app.get('/health', (req, res) => {
-  res.status(200).json({
-    status: 'OK',
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    environment: process.env.NODE_ENV || 'development'
-  });
-});
+// Health check routes (before auth)
+app.use('/health', healthRoutes);
 
 // API routes
 app.use('/api/auth', authRoutes);
@@ -72,8 +134,38 @@ app.use('/api/exams', examRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/stats', statsRoutes);
 
+// API version prefix (optional, for future versioning)
+app.use('/api/v1/auth', authRoutes);
+app.use('/api/v1/questions', questionRoutes);
+app.use('/api/v1/exams', examRoutes);
+app.use('/api/v1/users', userRoutes);
+app.use('/api/v1/stats', statsRoutes);
+
 // Error handling
-app.use(notFound);
+app.use(notFoundHandler);
 app.use(errorHandler);
+
+// Graceful shutdown handler
+process.on('SIGTERM', () => {
+  logger.info('SIGTERM received, shutting down gracefully');
+  // Close server and database connections
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  logger.info('SIGINT received, shutting down gracefully');
+  process.exit(0);
+});
+
+// Unhandled rejection handler
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error('Unhandled Rejection at:', { promise, reason });
+});
+
+// Uncaught exception handler
+process.on('uncaughtException', (error) => {
+  logger.error('Uncaught Exception:', error);
+  process.exit(1);
+});
 
 module.exports = app;
