@@ -1,421 +1,423 @@
-// src/models/Question.js - Updated for PostgreSQL schema
+/**
+ * @fileoverview Question Model
+ * Represents a question in the certification exam system
+ */
+
+/**
+ * Difficulty levels
+ */
+const Difficulty = {
+  EASY: 'easy',
+  MEDIUM: 'medium',
+  HARD: 'hard',
+  EXPERT: 'expert',
+};
+
+const AllDifficulties = Object.values(Difficulty);
+
+/**
+ * Question types
+ */
+const QuestionType = {
+  MULTIPLE_CHOICE: 'multiple_choice',
+  MULTIPLE_ANSWER: 'multiple_answer',
+  TRUE_FALSE: 'true_false',
+};
+
+/**
+ * Review status
+ */
+const ReviewStatus = {
+  PENDING: 'pending',
+  APPROVED: 'approved',
+  REJECTED: 'rejected',
+  NEEDS_REVISION: 'needs_revision',
+};
+
+/**
+ * Question class
+ */
 class Question {
-  constructor(data) {
-    // Primary identifiers
-    this.id = data.id;
-    this.externalId = data.externalId || data.external_id;
+  /**
+   * Create a Question instance
+   * @param {Object} data - Question data
+   */
+  constructor(data = {}) {
+    this.id = data.id || null;
+    this.externalId = data.external_id || data.externalId || null;
+    this.text = data.question_text || data.text || '';
+    this.explanation = data.explanation || '';
+    this.difficulty = data.difficulty_level || data.difficulty || Difficulty.MEDIUM;
+    this.expectedAnswers = data.expected_answers_count || data.expectedAnswers || 1;
+    this.points = data.points || 1.0;
+    this.isActive = data.is_active ?? data.isActive ?? true;
+    this.reviewStatus = data.review_status || data.reviewStatus || ReviewStatus.PENDING;
+    this.category = data.category || data.topic_name || '';
     
-    // Content
-    this.text = data.text || data.question_text;
-    this.options = data.options || [];
-    this.correctAnswers = data.correctAnswers || [];
-    this.explanation = data.explanation;
+    // Relationships
+    this.topicId = data.topic_id || data.topicId || null;
+    this.topicName = data.topic_name || data.topicName || '';
+    this.certificationId = data.certification_id || data.certificationId || null;
+    this.certificationName = data.certification_name || data.certificationName || '';
+    this.certificationCode = data.certification_code || data.certificationCode || '';
+    this.providerId = data.provider_id || data.providerId || null;
+    this.providerName = data.provider_name || data.providerName || '';
     
-    // Classification
-    this.category = data.category || data.topic_name;
-    this.subcategory = data.subcategory;
-    this.provider = data.provider || data.provider_name;
-    this.certification = data.certification || data.certification_name;
-    this.certificationCode = data.certificationCode || data.certification_code;
-    this.difficulty = data.difficulty || data.difficulty_level || 'medium';
-    this.tags = data.tags || [];
+    // Question type
+    this.questionType = data.question_type || data.questionType || QuestionType.MULTIPLE_CHOICE;
+    this.questionTypeDisplay = data.question_type_display || this.getQuestionTypeDisplay();
     
-    // Question properties
-    this.questionType = data.questionType || data.question_type || 'multiple_choice';
-    this.questionTypeDisplay = data.questionTypeDisplay || data.question_type_display;
-    this.expectedAnswers = data.expectedAnswers || data.expected_answers_count || 1;
-    this.points = parseFloat(data.points) || 1.0;
-    this.isMultipleChoice = data.isMultipleChoice !== undefined ? 
-      data.isMultipleChoice : (this.expectedAnswers > 1);
+    // Options and answers
+    this.options = this.parseOptions(data.options);
+    this.correctAnswers = this.parseCorrectAnswers(data.correct_answer_indices || data.correctAnswers);
     
-    // Status and metadata
-    this.isActive = data.isActive !== undefined ? data.isActive : true;
-    this.reviewStatus = data.reviewStatus || data.review_status || 'pending';
-    this.createdAt = data.createdAt || data.created_at || new Date().toISOString();
-    this.updatedAt = data.updatedAt || data.updated_at || new Date().toISOString();
-    
-    // Statistics
-    this.stats = data.stats || {
-      totalAttempts: data.total_attempts || 0,
-      correctAttempts: data.correct_attempts || 0,
-      averageTime: data.average_time_seconds || data.average_time || 0,
-      successRate: data.success_rate || 0
-    };
+    // Metadata
+    this.createdBy = data.created_by || data.createdBy || null;
+    this.createdAt = data.created_at || data.createdAt || new Date().toISOString();
+    this.updatedAt = data.updated_at || data.updatedAt || new Date().toISOString();
   }
 
+  /**
+   * Enums
+   */
+  static get Difficulty() {
+    return Difficulty;
+  }
+
+  static get QuestionType() {
+    return QuestionType;
+  }
+
+  static get ReviewStatus() {
+    return ReviewStatus;
+  }
+
+  /**
+   * Check if difficulty is valid
+   * @param {string} difficulty
+   * @returns {boolean}
+   */
+  static isValidDifficulty(difficulty) {
+    return Boolean(difficulty && AllDifficulties.includes(difficulty));
+  }
+
+  /**
+   * Parse options from various formats
+   * @param {Array|string} options
+   * @returns {Array}
+   */
+  parseOptions(options) {
+    if (!options) return [];
+    if (typeof options === 'string') {
+      try {
+        return JSON.parse(options);
+      } catch {
+        return [];
+      }
+    }
+    return Array.isArray(options) ? options : [];
+  }
+
+  /**
+   * Parse correct answers from various formats
+   * @param {Array|string} answers
+   * @returns {Array}
+   */
+  parseCorrectAnswers(answers) {
+    if (!answers) return [];
+    if (typeof answers === 'string') {
+      try {
+        return JSON.parse(answers);
+      } catch {
+        return [];
+      }
+    }
+    return Array.isArray(answers) ? answers : [answers];
+  }
+
+  /**
+   * Get display name for question type
+   * @returns {string}
+   */
+  getQuestionTypeDisplay() {
+    const displays = {
+      [QuestionType.MULTIPLE_CHOICE]: 'Multiple Choice',
+      [QuestionType.MULTIPLE_ANSWER]: 'Multiple Answer',
+      [QuestionType.TRUE_FALSE]: 'True/False',
+    };
+    return displays[this.questionType] || 'Multiple Choice';
+  }
+
+  /**
+   * Check if this is a multiple answer question
+   * @returns {boolean}
+   */
+  get isMultipleChoice() {
+    return this.questionType === QuestionType.MULTIPLE_ANSWER || 
+           this.expectedAnswers > 1 ||
+           this.correctAnswers.length > 1;
+  }
+
+  /**
+   * Alias for isMultipleChoice
+   * @returns {boolean}
+   */
+  isMultipleAnswer() {
+    return this.isMultipleChoice;
+  }
+
+  /**
+   * Validate question data
+   * @param {Object} data - Question data
+   * @returns {Array} - Array of validation errors
+   */
   static validate(data) {
     const errors = [];
 
-    // Required fields validation
-    if (!data.text || data.text.trim().length === 0) {
+    // Text validation
+    if (!data.text || typeof data.text !== 'string') {
       errors.push('Question text is required');
+    } else if (data.text.length < 10) {
+      errors.push('Question text must be at least 10 characters');
+    } else if (data.text.length > 5000) {
+      errors.push('Question text cannot exceed 5000 characters');
     }
 
-    if (data.text && data.text.length > 5000) {
-      errors.push('Question text is too long (max 5000 characters)');
-    }
-
-    if (!data.options || !Array.isArray(data.options) || data.options.length < 2) {
-      errors.push('At least 2 options are required');
-    }
-
-    if (data.options && data.options.length > 8) {
-      errors.push('Maximum 8 options allowed');
-    }
-
-    if (!data.correctAnswers || !Array.isArray(data.correctAnswers) || data.correctAnswers.length === 0) {
-      errors.push('At least one correct answer is required');
-    }
-
-    if (!data.category && !data.topic_name) {
-      errors.push('Category/Topic is required');
-    }
-
-    if (!data.provider && !data.provider_name) {
-      errors.push('Provider is required');
-    }
-
-    // Multiple choice validation
-    if (data.isMultipleChoice || data.expectedAnswers > 1) {
-      if (data.correctAnswers && data.correctAnswers.length === 1) {
-        errors.push('Multiple choice questions must have more than one correct answer');
-      }
-      
-      if (data.expectedAnswers && data.correctAnswers && 
-          data.expectedAnswers !== data.correctAnswers.length) {
-        errors.push('Expected answers count must match the number of correct answers');
-      }
-      
-      if (data.options && data.correctAnswers && 
-          data.correctAnswers.length >= data.options.length) {
-        errors.push('Multiple choice questions must have at least one incorrect option');
-      }
+    // Options validation
+    if (!data.options || !Array.isArray(data.options)) {
+      errors.push('Options are required');
     } else {
-      // Single choice validation
-      if (data.correctAnswers && data.correctAnswers.length > 1) {
-        errors.push('Single choice questions must have exactly one correct answer');
+      if (data.options.length < 2) {
+        errors.push('At least 2 options are required');
+      }
+      if (data.options.length > 10) {
+        errors.push('Maximum 10 options allowed');
       }
       
-      if (data.expectedAnswers && data.expectedAnswers !== 1) {
-        errors.push('Single choice questions must expect exactly 1 answer');
-      }
-    }
-
-    // Validate correct answer indices
-    if (data.options && data.correctAnswers) {
-      const maxIndex = data.options.length - 1;
-      for (const index of data.correctAnswers) {
-        if (!Number.isInteger(index) || index < 0 || index > maxIndex) {
-          errors.push(`Invalid correct answer index: ${index}`);
+      // Validate each option and check for unique labels
+      const labels = new Set();
+      data.options.forEach((option, index) => {
+        if (!option.text || typeof option.text !== 'string') {
+          errors.push(`Option ${index + 1} text is required`);
         }
+        if (!option.label) {
+          errors.push(`Option ${index + 1} label is required`);
+        } else {
+          if (labels.has(option.label)) {
+            errors.push('Option labels must be unique');
+          }
+          labels.add(option.label);
+        }
+      });
+    }
+
+    // Correct answers validation
+    if (!data.correctAnswers || !Array.isArray(data.correctAnswers)) {
+      errors.push('Correct answers are required');
+    } else {
+      if (data.correctAnswers.length < 1) {
+        errors.push('At least one correct answer is required');
+      }
+      
+      // Validate answer indices
+      if (data.options) {
+        data.correctAnswers.forEach(index => {
+          if (index < 0 || index >= data.options.length) {
+            errors.push(`Invalid correct answer index: ${index}`);
+          }
+        });
       }
     }
 
-    // Validate difficulty
-    const validDifficulties = ['easy', 'medium', 'hard', 'expert'];
-    if (data.difficulty && !validDifficulties.includes(data.difficulty)) {
-      errors.push(`Difficulty must be one of: ${validDifficulties.join(', ')}`);
+    // Difficulty validation
+    if (data.difficulty && !AllDifficulties.includes(data.difficulty)) {
+      errors.push(`Difficulty must be one of: ${AllDifficulties.join(', ')}`);
     }
 
-    // Validate expected answers
-    if (data.expectedAnswers && (data.expectedAnswers < 1 || data.expectedAnswers > 8)) {
-      errors.push('Expected answers must be between 1 and 8');
+    // Points validation
+    if (data.points !== undefined) {
+      if (typeof data.points !== 'number' || data.points < 0) {
+        errors.push('Points must be a positive number');
+      }
+      if (data.points > 10) {
+        errors.push('Points cannot exceed 10');
+      }
     }
 
-    // Validate points
-    if (data.points !== undefined && (data.points < 0.1 || data.points > 100)) {
-      errors.push('Points must be between 0.1 and 100');
-    }
-
-    // Validate question type
-    const validTypes = ['multiple_choice', 'multiple_answer', 'true_false', 'fill_blank', 'essay', 'matching', 'ordering'];
-    if (data.questionType && !validTypes.includes(data.questionType)) {
-      errors.push(`Question type must be one of: ${validTypes.join(', ')}`);
+    // Certification validation
+    if (!data.certificationId) {
+      errors.push('Certification is required');
     }
 
     return errors;
   }
 
-  getCorrectPercentage() {
-    if (this.stats.totalAttempts === 0) return 0;
-    return Math.round((this.stats.correctAttempts / this.stats.totalAttempts) * 100);
-  }
-
-  getSuccessRate() {
-    return this.stats.successRate || this.getCorrectPercentage();
-  }
-
-  // Check if a user answer is correct
-  isAnswerCorrect(userAnswer) {
-    if (this.isMultipleChoice) {
-      if (!Array.isArray(userAnswer)) {
-        return false;
-      }
-      
-      // Check that the number of answers matches expected
-      if (userAnswer.length !== this.correctAnswers.length) {
-        return false;
-      }
-      
-      // Sort both arrays and compare
-      const sortedUserAnswer = [...userAnswer].sort((a, b) => a - b);
-      const sortedCorrectAnswers = [...this.correctAnswers].sort((a, b) => a - b);
-      
-      return JSON.stringify(sortedUserAnswer) === JSON.stringify(sortedCorrectAnswers);
-    } else {
-      // For single choice questions
-      const answer = Array.isArray(userAnswer) ? userAnswer[0] : userAnswer;
-      return this.correctAnswers.includes(answer);
+  /**
+   * Check if answer is correct
+   * @param {number|Array} answer - User's answer
+   * @returns {boolean}
+   */
+  isCorrect(answer) {
+    if (!this.correctAnswers || this.correctAnswers.length === 0) {
+      return false;
     }
+
+    const userAnswers = Array.isArray(answer) ? answer : [answer];
+    
+    if (userAnswers.length !== this.correctAnswers.length) {
+      return false;
+    }
+
+    const sortedUser = [...userAnswers].sort((a, b) => a - b);
+    const sortedCorrect = [...this.correctAnswers].sort((a, b) => a - b);
+
+    return sortedUser.every((val, idx) => val === sortedCorrect[idx]);
   }
 
-  // Get options with correctness information
-  getOptionsWithCorrectness() {
-    return this.options.map((option, index) => ({
-      ...option,
-      index: index,
-      isCorrect: this.correctAnswers.includes(index)
+  /**
+   * Get correct option labels
+   * @returns {Array<string>}
+   */
+  getCorrectOptionLabels() {
+    return this.correctAnswers.map(index => this.options[index]?.label).filter(Boolean);
+  }
+
+  /**
+   * Shuffle options (updates correctAnswers accordingly)
+   */
+  shuffle() {
+    // Map correct answers to their text
+    const correctTexts = this.correctAnswers.map(i => this.options[i]?.text);
+    
+    // Fisher-Yates shuffle
+    const shuffled = [...this.options];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    
+    this.options = shuffled;
+    
+    // Update correct answers to new indices
+    this.correctAnswers = correctTexts
+      .map(text => shuffled.findIndex(opt => opt.text === text))
+      .filter(i => i >= 0);
+  }
+
+  /**
+   * Get options without revealing correct answers (for exam)
+   * @returns {Array}
+   */
+  getOptionsForExam() {
+    return this.options.map(opt => ({
+      label: opt.label,
+      text: opt.text,
     }));
   }
 
-  // Get question metadata without sensitive information
-  getMetadata() {
-    return {
+  /**
+   * Convert to exam format (no answers shown)
+   * @param {Object} options
+   * @returns {Object}
+   */
+  toExamFormat(options = {}) {
+    const result = {
       id: this.id,
-      externalId: this.externalId,
-      category: this.category,
-      subcategory: this.subcategory,
-      provider: this.provider,
-      certification: this.certification,
-      certificationCode: this.certificationCode,
-      difficulty: this.difficulty,
-      tags: this.tags,
-      questionType: this.questionType,
-      questionTypeDisplay: this.questionTypeDisplay,
-      isMultipleChoice: this.isMultipleChoice,
-      expectedAnswers: this.expectedAnswers,
-      points: this.points,
-      optionCount: this.options.length,
-      correctAnswerCount: this.correctAnswers.length,
-      hasExplanation: !!this.explanation,
-      reviewStatus: this.reviewStatus,
-      isActive: this.isActive,
-      stats: this.stats,
-      createdAt: this.createdAt,
-      updatedAt: this.updatedAt
-    };
-  }
-
-  // Get sanitized version (without correct answers)
-  getSanitized() {
-    return {
-      id: this.id,
-      externalId: this.externalId,
       text: this.text,
-      options: this.options.map(option => ({
-        label: option.label,
-        text: option.text
-        // Don't include explanation for options in sanitized version
-      })),
-      category: this.category,
-      subcategory: this.subcategory,
-      provider: this.provider,
-      certification: this.certification,
-      certificationCode: this.certificationCode,
-      difficulty: this.difficulty,
-      tags: this.tags,
-      questionType: this.questionType,
-      questionTypeDisplay: this.questionTypeDisplay,
+      options: this.getOptionsForExam(),
       isMultipleChoice: this.isMultipleChoice,
       expectedAnswers: this.expectedAnswers,
-      points: this.points,
-      createdAt: this.createdAt,
-      // Don't include: correctAnswers, explanation, stats (for security)
     };
+
+    if (options.includeMetadata) {
+      result.difficulty = this.difficulty;
+      result.category = this.category;
+    }
+
+    return result;
   }
 
-  // Get complete version (with all information)
-  getComplete() {
+  /**
+   * Convert to review format (with answers and explanation)
+   * @returns {Object}
+   */
+  toReviewFormat() {
     return {
       id: this.id,
-      externalId: this.externalId,
       text: this.text,
       options: this.options,
       correctAnswers: this.correctAnswers,
+      correctLabels: this.getCorrectOptionLabels(),
       explanation: this.explanation,
-      category: this.category,
-      subcategory: this.subcategory,
-      provider: this.provider,
-      certification: this.certification,
-      certificationCode: this.certificationCode,
       difficulty: this.difficulty,
-      tags: this.tags,
-      questionType: this.questionType,
-      questionTypeDisplay: this.questionTypeDisplay,
+      category: this.category,
       isMultipleChoice: this.isMultipleChoice,
+    };
+  }
+
+  /**
+   * Convert to JSON (safe for API response)
+   * @param {boolean} includeAnswers - Include correct answers
+   * @returns {Object}
+   */
+  toJSON(includeAnswers = false) {
+    const json = {
+      id: this.id,
+      externalId: this.externalId,
+      text: this.text,
+      explanation: includeAnswers ? this.explanation : undefined,
+      difficulty: this.difficulty,
       expectedAnswers: this.expectedAnswers,
       points: this.points,
-      reviewStatus: this.reviewStatus,
       isActive: this.isActive,
-      stats: this.stats,
-      createdAt: this.createdAt,
-      updatedAt: this.updatedAt
-    };
-  }
-
-  // Get answer result with explanation
-  getAnswerResult(userAnswer) {
-    const isCorrect = this.isAnswerCorrect(userAnswer);
-    
-    return {
-      questionId: this.id,
-      isCorrect: isCorrect,
-      correctAnswers: this.correctAnswers,
-      explanation: this.explanation,
-      userAnswer: userAnswer,
-      points: isCorrect ? this.points : 0,
-      options: this.getOptionsWithCorrectness()
-    };
-  }
-
-  // Update statistics
-  updateStats(isCorrect, timeSpent) {
-    this.stats.totalAttempts++;
-    if (isCorrect) {
-      this.stats.correctAttempts++;
-    }
-    
-    // Calculate average time
-    if (timeSpent > 0) {
-      const totalTime = this.stats.averageTime * (this.stats.totalAttempts - 1) + timeSpent;
-      this.stats.averageTime = Math.round(totalTime / this.stats.totalAttempts);
-    }
-    
-    // Update success rate
-    this.stats.successRate = this.getCorrectPercentage();
-    
-    this.updatedAt = new Date().toISOString();
-  }
-
-  // Get calculated difficulty based on statistics
-  getCalculatedDifficulty() {
-    const successRate = this.getSuccessRate();
-    
-    if (successRate >= 80) return 'easy';
-    if (successRate >= 60) return 'medium';
-    if (successRate >= 30) return 'hard';
-    return 'expert';
-  }
-
-  // Validate options format
-  static validateOptions(options) {
-    const errors = [];
-    
-    if (!Array.isArray(options)) {
-      errors.push('Options must be an array');
-      return errors;
-    }
-    
-    if (options.length < 2) {
-      errors.push('At least 2 options are required');
-      return errors;
-    }
-    
-    if (options.length > 8) {
-      errors.push('Maximum 8 options allowed');
-    }
-    
-    options.forEach((option, index) => {
-      if (!option.text || option.text.trim().length === 0) {
-        errors.push(`Option ${index + 1} text is required`);
-      }
-      
-      if (option.text && option.text.length > 1000) {
-        errors.push(`Option ${index + 1} text is too long (max 1000 characters)`);
-      }
-      
-      if (option.explanation && option.explanation.length > 500) {
-        errors.push(`Option ${index + 1} explanation is too long (max 500 characters)`);
-      }
-    });
-    
-    // Check for duplicate options
-    const optionTexts = options.map(opt => opt.text?.trim().toLowerCase()).filter(Boolean);
-    const uniqueTexts = new Set(optionTexts);
-    if (uniqueTexts.size !== optionTexts.length) {
-      errors.push('Duplicate options are not allowed');
-    }
-    
-    return errors;
-  }
-
-  // Convert to exam format for frontend
-  toExamFormat() {
-    return {
-      id: this.id,
-      text: this.text,
-      options: this.options.map(option => ({
-        label: option.label,
-        text: option.text
-      })),
-      category: this.category,
-      provider: this.provider,
-      certification: this.certification,
+      reviewStatus: this.reviewStatus,
+      topicName: this.topicName,
+      certificationName: this.certificationName,
       certificationCode: this.certificationCode,
-      difficulty: this.difficulty,
+      providerName: this.providerName,
       questionType: this.questionType,
+      questionTypeDisplay: this.questionTypeDisplay,
+      options: this.getOptionsForExam(),
       isMultipleChoice: this.isMultipleChoice,
-      expectedAnswers: this.expectedAnswers,
-      points: this.points
-      // Don't include correctAnswers or explanation for exam mode
     };
+
+    if (includeAnswers) {
+      json.correctAnswers = this.correctAnswers;
+    }
+
+    return json;
   }
 
-  // Convert to review format for admins
-  toReviewFormat() {
-    return {
-      ...this.getComplete(),
-      validationErrors: Question.validate(this.getComplete()),
-      optionErrors: Question.validateOptions(this.options),
-      calculatedDifficulty: this.getCalculatedDifficulty(),
-      isValid: this.isValid()
-    };
+  /**
+   * Create a deep clone of this question
+   * @returns {Question}
+   */
+  clone() {
+    return new Question({
+      id: this.id,
+      question_text: this.text,
+      explanation: this.explanation,
+      difficulty_level: this.difficulty,
+      expected_answers_count: this.expectedAnswers,
+      points: this.points,
+      is_active: this.isActive,
+      review_status: this.reviewStatus,
+      topic_id: this.topicId,
+      topic_name: this.topicName,
+      certification_id: this.certificationId,
+      certification_name: this.certificationName,
+      question_type: this.questionType,
+      options: JSON.parse(JSON.stringify(this.options)),
+      correct_answer_indices: [...this.correctAnswers],
+      category: this.category,
+    });
   }
 
-  // Check if question is valid
-  isValid() {
-    const errors = Question.validate(this.getComplete());
-    const optionErrors = Question.validateOptions(this.options);
-    return errors.length === 0 && optionErrors.length === 0;
-  }
-
-  // Get difficulty color for UI
-  getDifficultyColor() {
-    const colors = {
-      easy: '#28a745',
-      medium: '#ffc107', 
-      hard: '#fd7e14',
-      expert: '#dc3545'
-    };
-    return colors[this.difficulty] || colors.medium;
-  }
-
-  // Get question type icon
-  getQuestionTypeIcon() {
-    const icons = {
-      multiple_choice: '◦',
-      multiple_answer: '☑',
-      true_false: '⚖',
-      fill_blank: '___',
-      essay: '📝',
-      matching: '⟷',
-      ordering: '📶'
-    };
-    return icons[this.questionType] || '❓';
-  }
-
-  // Convert to database format for saving
-  toDatabaseFormat() {
+  /**
+   * Convert to database format
+   * @returns {Object}
+   */
+  toDatabase() {
     return {
       external_id: this.externalId,
       question_text: this.text,
@@ -423,37 +425,15 @@ class Question {
       difficulty_level: this.difficulty,
       expected_answers_count: this.expectedAnswers,
       points: this.points,
+      is_active: this.isActive,
       review_status: this.reviewStatus,
-      is_active: this.isActive
+      topic_id: this.topicId,
+      certification_id: this.certificationId,
+      question_type: this.questionType,
+      options: JSON.stringify(this.options),
+      correct_answer_indices: JSON.stringify(this.correctAnswers),
+      created_by: this.createdBy,
     };
-  }
-
-  // Create from database row
-  static fromDatabaseRow(row) {
-    return new Question({
-      id: row.id,
-      externalId: row.external_id,
-      text: row.question_text,
-      explanation: row.explanation,
-      difficulty: row.difficulty_level,
-      expectedAnswers: row.expected_answers_count,
-      points: row.points,
-      reviewStatus: row.review_status,
-      isActive: row.is_active,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      // Add other mapped fields as needed
-    });
-  }
-
-  // Clone question for editing
-  clone() {
-    return new Question(this.getComplete());
-  }
-
-  // Export to JSON
-  toJSON() {
-    return this.getComplete();
   }
 }
 

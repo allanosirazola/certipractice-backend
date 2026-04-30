@@ -1,340 +1,320 @@
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const config = require('../config/config');
-const db = require('../utils/database');
-const logger = require('../utils/logger');
+/**
+ * @fileoverview User Model
+ * Represents a user in the system
+ */
 
+const bcrypt = require('bcryptjs');
+
+/**
+ * User roles
+ */
+const Role = {
+  ADMIN: 'admin',
+  INSTRUCTOR: 'instructor',
+  STUDENT: 'student',
+};
+
+const AllRoles = Object.values(Role);
+
+/**
+ * User class
+ */
 class User {
-  constructor(userData = {}) {
-    this.id = userData.id || null;
-    this.username = userData.username || '';
-    this.email = userData.email || '';
-    this.password_hash = userData.password_hash || '';
-    this.first_name = userData.first_name || '';
-    this.last_name = userData.last_name || '';
-    this.role = userData.role || 'student';
-    this.is_active = userData.is_active !== undefined ? userData.is_active : true;
-    this.is_validated = userData.is_validated !== undefined ? userData.is_validated : false;
-    this.last_login = userData.last_login || null;
-    this.created_at = userData.created_at || null;
-    this.updated_at = userData.updated_at || null;
+  /**
+   * Create a User instance
+   * @param {Object} data - User data
+   */
+  constructor(data = {}) {
+    this.id = data.id || null;
+    this.username = data.username || '';
+    this.email = data.email || '';
+    this.passwordHash = data.password_hash || data.passwordHash || '';
+    this.firstName = data.first_name || data.firstName || '';
+    this.lastName = data.last_name || data.lastName || '';
+    this.role = data.role || Role.STUDENT;
+    this.isActive = data.is_active ?? data.isActive ?? true;
+    this.isValidated = data.is_validated ?? data.isValidated ?? false;
+    this.lastLogin = data.last_login || data.lastLogin || null;
+    this.createdAt = data.created_at || data.createdAt || new Date().toISOString();
+    this.updatedAt = data.updated_at || data.updatedAt || new Date().toISOString();
   }
 
-  static validate(userData) {
+  /**
+   * User roles enum
+   */
+  static get Role() {
+    return Role;
+  }
+
+  /**
+   * Roles object for external access
+   */
+  static get Roles() {
+    return Role;
+  }
+
+  /**
+   * All roles array
+   */
+  static get AllRoles() {
+    return AllRoles;
+  }
+
+  /**
+   * Check if role is valid
+   * @param {string} role - Role to check
+   * @returns {boolean}
+   */
+  static isValidRole(role) {
+    return Boolean(role && AllRoles.includes(role));
+  }
+
+  /**
+   * Validate user registration data
+   * @param {Object} data - Registration data
+   * @returns {Array} - Array of validation errors
+   */
+  static validate(data) {
     const errors = [];
-    
+
     // Username validation
-    if (!userData.username || userData.username.length < 3) {
-      errors.push('Username must be at least 3 characters long');
-    }
-    
-    if (userData.username && !/^[a-zA-Z0-9_]+$/.test(userData.username)) {
-      errors.push('Username can only contain letters, numbers, and underscores');
-    }
-    
-    // Email validation
-    if (!userData.email) {
-      errors.push('Email is required');
-    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(userData.email)) {
-      errors.push('Please provide a valid email address');
-    }
-    
-    // Password validation
-    if (!userData.password) {
-      errors.push('Password is required');
-    } else if (userData.password.length < config.security.passwordMinLength) {
-      errors.push(`Password must be at least ${config.security.passwordMinLength} characters long`);
-    }
-    
-    if (config.security.requireStrongPasswords && userData.password) {
-      const strongPasswordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]/;
-      if (!strongPasswordRegex.test(userData.password)) {
-        errors.push('Password must contain at least one uppercase letter, one lowercase letter, one number, and one special character');
+    if (!data.username || typeof data.username !== 'string') {
+      errors.push('Username is required');
+    } else {
+      if (data.username.length < 3) {
+        errors.push('Username must be at least 3 characters');
+      }
+      if (data.username.length > 50) {
+        errors.push('Username cannot exceed 50 characters');
+      }
+      if (!/^[a-zA-Z0-9_]+$/.test(data.username)) {
+        errors.push('Username can only contain alphanumeric characters and underscores');
       }
     }
-    
+
+    // Email validation
+    if (!data.email || typeof data.email !== 'string') {
+      errors.push('Email is required');
+    } else {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(data.email)) {
+        errors.push('Please provide a valid email address');
+      }
+      if (data.email.length > 255) {
+        errors.push('Email cannot exceed 255 characters');
+      }
+    }
+
+    // Password validation
+    if (!data.password || typeof data.password !== 'string') {
+      errors.push('Password is required');
+    } else {
+      if (data.password.length < 8) {
+        errors.push('Password must be at least 8 characters');
+      }
+      if (data.password.length > 128) {
+        errors.push('Password cannot exceed 128 characters');
+      }
+    }
+
+    // Name validation (optional)
+    if (data.firstName && data.firstName.length > 100) {
+      errors.push('First name cannot exceed 100 characters');
+    }
+    if (data.lastName && data.lastName.length > 100) {
+      errors.push('Last name cannot exceed 100 characters');
+    }
+
+    // Role validation
+    if (data.role && !AllRoles.includes(data.role)) {
+      errors.push(`Role must be one of: ${AllRoles.join(', ')}`);
+    }
+
     return errors;
   }
 
-  async hashPassword() {
-    if (this.password) {
-      this.password_hash = await bcrypt.hash(this.password, config.bcryptRounds);
-      delete this.password; // Remove plain password
+  /**
+   * Validate login data
+   * @param {Object} data - Login data
+   * @returns {Array} - Array of validation errors
+   */
+  static validateLogin(data) {
+    const errors = [];
+
+    if (!data.email && !data.username) {
+      errors.push('Email or username is required');
     }
+
+    if (!data.password) {
+      errors.push('Password is required');
+    }
+
+    return errors;
   }
 
-  async comparePassword(password) {
-    return bcrypt.compare(password, this.password_hash);
+  /**
+   * Validate password change data
+   * @param {Object} data - Password change data
+   * @returns {Array} - Array of validation errors
+   */
+  static validatePasswordChange(data) {
+    const errors = [];
+
+    if (!data.currentPassword) {
+      errors.push('Current password is required');
+    }
+
+    if (!data.newPassword) {
+      errors.push('New password is required');
+    } else if (data.newPassword.length < 8) {
+      errors.push('New password must be at least 8 characters');
+    }
+
+    if (data.currentPassword === data.newPassword) {
+      errors.push('New password must be different from current password');
+    }
+
+    return errors;
   }
 
-  generateToken() {
-    return jwt.sign(
-      { 
-        id: this.id,
-        email: this.email,
-        role: this.role
-      },
-      config.jwtSecret,
-      { expiresIn: config.jwtExpire }
-    );
+  /**
+   * Hash a password
+   * @param {string} password - Plain text password
+   * @param {number} rounds - Bcrypt rounds
+   * @returns {Promise<string>} - Hashed password
+   */
+  static async hashPassword(password, rounds = 12) {
+    return bcrypt.hash(password, rounds);
   }
 
+  /**
+   * Compare password with hash
+   * @param {string} password - Plain text password
+   * @param {string} hash - Password hash
+   * @returns {Promise<boolean>} - True if match
+   */
+  static async comparePassword(password, hash) {
+    return bcrypt.compare(password, hash);
+  }
+
+  /**
+   * Check if user is admin
+   * @returns {boolean}
+   */
+  get isAdmin() {
+    return this.role === Role.ADMIN;
+  }
+
+  /**
+   * Check if user is instructor (or admin)
+   * @returns {boolean}
+   */
+  get isInstructor() {
+    return this.role === Role.INSTRUCTOR || this.role === Role.ADMIN;
+  }
+
+  /**
+   * Check if user is student
+   * @returns {boolean}
+   */
+  get isStudent() {
+    return this.role === Role.STUDENT;
+  }
+
+  /**
+   * Check if user has any of the given roles
+   * @param {...string} roles - Roles to check
+   * @returns {boolean}
+   */
+  hasRole(...roles) {
+    return roles.includes(this.role);
+  }
+
+  /**
+   * Check if user can access resource
+   * @param {number} resourceOwnerId - Owner ID of resource
+   * @returns {boolean}
+   */
+  canAccess(resourceOwnerId) {
+    return this.isAdmin || this.id === resourceOwnerId;
+  }
+
+  /**
+   * Check if user can access resource (alias)
+   * @param {number} resourceOwnerId - Owner ID of resource
+   * @returns {boolean}
+   */
+  canAccessResource(resourceOwnerId) {
+    return this.canAccess(resourceOwnerId);
+  }
+
+  /**
+   * Get full name
+   * @returns {string}
+   */
+  getFullName() {
+    return `${this.firstName} ${this.lastName}`.trim();
+  }
+
+  /**
+   * Get display name (full name, username, or email)
+   * @returns {string}
+   */
+  getDisplayName() {
+    const fullName = this.getFullName();
+    return fullName || this.username || this.email || '';
+  }
+
+  /**
+   * Convert to JSON (safe for API response)
+   * @returns {Object}
+   */
   toJSON() {
-    const userObj = {
+    return {
       id: this.id,
       username: this.username,
       email: this.email,
-      firstName: this.first_name,
-      lastName: this.last_name,
+      firstName: this.firstName,
+      lastName: this.lastName,
+      fullName: this.getFullName(),
       role: this.role,
-      isActive: this.is_active,
-      isValidated: this.is_validated,
-      lastLogin: this.last_login,
-      createdAt: this.created_at,
-      updatedAt: this.updated_at
+      isAdmin: this.isAdmin,
+      isInstructor: this.isInstructor,
+      isActive: this.isActive,
+      isValidated: this.isValidated,
+      lastLogin: this.lastLogin,
+      createdAt: this.createdAt,
+      updatedAt: this.updatedAt,
     };
-
-    // Remove password-related fields from JSON output
-    delete userObj.password_hash;
-    delete userObj.password;
-    
-    return userObj;
   }
 
-  get isAdmin() {
-    return this.role === 'admin';
+  /**
+   * Convert to public JSON (limited data for other users)
+   * @returns {Object}
+   */
+  toPublicJSON() {
+    return {
+      id: this.id,
+      username: this.username,
+      displayName: this.getDisplayName(),
+    };
   }
 
-  get isInstructor() {
-    return ['admin', 'instructor'].includes(this.role);
-  }
-
-  get isStudent() {
-    return this.role === 'student';
-  }
-
-  // Static methods for database operations
-  static async findById(id) {
-    try {
-      const query = `
-        SELECT * FROM users 
-        WHERE id = $1 AND is_active = true
-      `;
-      const result = await db.query(query, [id]);
-      
-      if (result.rows.length === 0) {
-        return null;
-      }
-      
-      return new User(result.rows[0]);
-    } catch (error) {
-      logger.error('Error finding user by ID:', error);
-      throw new Error('Database error');
-    }
-  }
-
-  static async findByEmail(email) {
-    try {
-      const query = `
-        SELECT * FROM users 
-        WHERE email = $1
-      `;
-      const result = await db.query(query, [email]);
-      
-      if (result.rows.length === 0) {
-        return null;
-      }
-      
-      return new User(result.rows[0]);
-    } catch (error) {
-      logger.error('Error finding user by email:', error);
-      throw new Error('Database error');
-    }
-  }
-
-  static async findByUsername(username) {
-    try {
-      const query = `
-        SELECT * FROM users 
-        WHERE username = $1
-      `;
-      const result = await db.query(query, [username]);
-      
-      if (result.rows.length === 0) {
-        return null;
-      }
-      
-      return new User(result.rows[0]);
-    } catch (error) {
-      logger.error('Error finding user by username:', error);
-      throw new Error('Database error');
-    }
-  }
-
-  async save() {
-    try {
-      if (this.id) {
-        // Update existing user
-        const query = `
-          UPDATE users 
-          SET username = $1, email = $2, password_hash = $3, 
-              first_name = $4, last_name = $5, role = $6, 
-              is_active = $7, is_validated = $8, last_login = $9,
-              updated_at = CURRENT_TIMESTAMP
-          WHERE id = $10
-          RETURNING *
-        `;
-        const values = [
-          this.username, this.email, this.password_hash,
-          this.first_name, this.last_name, this.role,
-          this.is_active, this.is_validated, this.last_login,
-          this.id
-        ];
-        
-        const result = await db.query(query, values);
-        const userData = result.rows[0];
-        
-        // Update instance with returned data
-        Object.assign(this, userData);
-        
-        return this;
-      } else {
-        // Create new user
-        const query = `
-          INSERT INTO users (username, email, password_hash, first_name, last_name, role, is_active, is_validated)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-          RETURNING *
-        `;
-        const values = [
-          this.username, this.email, this.password_hash,
-          this.first_name, this.last_name, this.role,
-          this.is_active, this.is_validated
-        ];
-        
-        const result = await db.query(query, values);
-        const userData = result.rows[0];
-        
-        // Update instance with returned data
-        Object.assign(this, userData);
-        
-        return this;
-      }
-    } catch (error) {
-      logger.error('Error saving user:', error);
-      
-      // Handle specific PostgreSQL errors
-      if (error.code === '23505') {
-        if (error.constraint === 'users_email_key') {
-          throw new Error('Email already exists');
-        } else if (error.constraint === 'users_username_key') {
-          throw new Error('Username already exists');
-        }
-      }
-      
-      throw new Error('Database error');
-    }
-  }
-
-  async delete() {
-    try {
-      if (!this.id) {
-        throw new Error('Cannot delete user without ID');
-      }
-
-      // Soft delete by setting is_active to false
-      const query = `
-        UPDATE users 
-        SET is_active = false, updated_at = CURRENT_TIMESTAMP
-        WHERE id = $1
-        RETURNING *
-      `;
-      
-      const result = await db.query(query, [this.id]);
-      
-      if (result.rows.length === 0) {
-        throw new Error('User not found');
-      }
-      
-      this.is_active = false;
-      this.updated_at = result.rows[0].updated_at;
-      
-      return this;
-    } catch (error) {
-      logger.error('Error deleting user:', error);
-      throw new Error('Database error');
-    }
-  }
-
-  // Get user statistics
-  async getStats() {
-    try {
-      const query = `
-        SELECT 
-          COUNT(DISTINCT e.id) as total_exams,
-          COUNT(DISTINCT CASE WHEN e.passing_status = 'passed' THEN e.id END) as passed_exams,
-          COALESCE(AVG(e.percentage_score), 0) as average_score,
-          COALESCE(SUM(e.total_questions), 0) as total_questions,
-          COALESCE(SUM(e.correct_answers), 0) as correct_answers,
-          COALESCE(SUM(e.time_spent_minutes), 0) as total_time_minutes
-        FROM users u
-        LEFT JOIN exams e ON u.id = e.user_id AND e.status = 'completed'
-        WHERE u.id = $1
-        GROUP BY u.id
-      `;
-      
-      const result = await db.query(query, [this.id]);
-      
-      if (result.rows.length === 0) {
-        return {
-          totalExams: 0,
-          passedExams: 0,
-          averageScore: 0,
-          totalQuestions: 0,
-          correctAnswers: 0,
-          totalTimeMinutes: 0,
-          successRate: 0
-        };
-      }
-      
-      const stats = result.rows[0];
-      return {
-        totalExams: parseInt(stats.total_exams) || 0,
-        passedExams: parseInt(stats.passed_exams) || 0,
-        averageScore: Math.round(parseFloat(stats.average_score) || 0),
-        totalQuestions: parseInt(stats.total_questions) || 0,
-        correctAnswers: parseInt(stats.correct_answers) || 0,
-        totalTimeMinutes: parseInt(stats.total_time_minutes) || 0,
-        successRate: stats.total_questions > 0 
-          ? Math.round((stats.correct_answers / stats.total_questions) * 100) 
-          : 0
-      };
-    } catch (error) {
-      logger.error('Error getting user stats:', error);
-      throw new Error('Database error');
-    }
-  }
-
-  // Update last login
-  async updateLastLogin() {
-    try {
-      const query = `
-        UPDATE users 
-        SET last_login = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-        WHERE id = $1
-        RETURNING last_login
-      `;
-      
-      const result = await db.query(query, [this.id]);
-      
-      if (result.rows.length > 0) {
-        this.last_login = result.rows[0].last_login;
-      }
-      
-      return this;
-    } catch (error) {
-      logger.error('Error updating last login:', error);
-      throw new Error('Database error');
-    }
+  /**
+   * Convert to database format
+   * @returns {Object}
+   */
+  toDatabase() {
+    return {
+      username: this.username,
+      email: this.email,
+      password_hash: this.passwordHash,
+      first_name: this.firstName,
+      last_name: this.lastName,
+      role: this.role,
+      is_active: this.isActive,
+      is_validated: this.isValidated,
+    };
   }
 }
 

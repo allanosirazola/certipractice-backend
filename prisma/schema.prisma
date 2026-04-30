@@ -1,0 +1,342 @@
+// Prisma Schema for Certification Exam System
+// This schema represents the database structure for managing certification exams
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// USER MANAGEMENT
+// ============================================================================
+
+model User {
+  id            Int       @id @default(autoincrement())
+  username      String    @unique @db.VarChar(50)
+  email         String    @unique @db.VarChar(255)
+  passwordHash  String    @map("password_hash") @db.VarChar(255)
+  firstName     String?   @map("first_name") @db.VarChar(100)
+  lastName      String?   @map("last_name") @db.VarChar(100)
+  role          UserRole  @default(student)
+  isActive      Boolean   @default(true) @map("is_active")
+  isValidated   Boolean   @default(false) @map("is_validated")
+  lastLoginAt   DateTime? @map("last_login_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  exams             Exam[]
+  createdQuestions  Question[]       @relation("QuestionCreator")
+  reviewedQuestions Question[]       @relation("QuestionReviewer")
+  questionReports   QuestionReport[]
+
+  @@index([email])
+  @@index([username])
+  @@index([role])
+  @@map("users")
+}
+
+enum UserRole {
+  admin
+  instructor
+  student
+}
+
+// ============================================================================
+// CERTIFICATION STRUCTURE
+// ============================================================================
+
+model Provider {
+  id          Int      @id @default(autoincrement())
+  name        String   @unique @db.VarChar(100)
+  code        String   @unique @db.VarChar(20)
+  description String?  @db.Text
+  logoUrl     String?  @map("logo_url") @db.VarChar(500)
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  certifications Certification[]
+
+  @@map("providers")
+}
+
+model Certification {
+  id          Int      @id @default(autoincrement())
+  providerId  Int      @map("provider_id")
+  name        String   @db.VarChar(200)
+  code        String   @unique @db.VarChar(50)
+  description String?  @db.Text
+  difficulty  String   @default("medium") @db.VarChar(20)
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  provider Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  topics   Topic[]
+  exams    Exam[]
+
+  @@unique([providerId, code])
+  @@index([providerId])
+  @@map("certifications")
+}
+
+model Topic {
+  id              Int      @id @default(autoincrement())
+  certificationId Int      @map("certification_id")
+  name            String   @db.VarChar(200)
+  description     String?  @db.Text
+  orderIndex      Int      @default(0) @map("order_index")
+  isActive        Boolean  @default(true) @map("is_active")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  certification Certification @relation(fields: [certificationId], references: [id], onDelete: Cascade)
+  questions     Question[]
+
+  @@unique([certificationId, name])
+  @@index([certificationId])
+  @@map("topics")
+}
+
+// ============================================================================
+// QUESTIONS
+// ============================================================================
+
+model QuestionType {
+  id          Int      @id @default(autoincrement())
+  name        String   @unique @db.VarChar(50)
+  description String?  @db.VarChar(200)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  // Relations
+  questions Question[]
+
+  @@map("question_types")
+}
+
+model Question {
+  id               String         @id @default(uuid()) @db.Uuid
+  topicId          Int            @map("topic_id")
+  questionTypeId   Int            @map("question_type_id")
+  questionText     String         @map("question_text") @db.Text
+  explanation      String?        @db.Text
+  difficulty       Difficulty     @default(medium)
+  points           Int            @default(1)
+  timeEstimate     Int?           @map("time_estimate") // seconds
+  tags             String[]       @default([])
+  contentHash      String         @unique @map("content_hash") @db.VarChar(64)
+  metadata         Json           @default("{}")
+  reviewStatus     ReviewStatus   @default(pending) @map("review_status")
+  reviewedById     Int?           @map("reviewed_by")
+  reviewedAt       DateTime?      @map("reviewed_at")
+  reviewNotes      String?        @map("review_notes") @db.Text
+  createdById      Int?           @map("created_by")
+  isActive         Boolean        @default(true) @map("is_active")
+  createdAt        DateTime       @default(now()) @map("created_at")
+  updatedAt        DateTime       @updatedAt @map("updated_at")
+
+  // Relations
+  topic        Topic              @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  questionType QuestionType       @relation(fields: [questionTypeId], references: [id])
+  createdBy    User?              @relation("QuestionCreator", fields: [createdById], references: [id])
+  reviewedBy   User?              @relation("QuestionReviewer", fields: [reviewedById], references: [id])
+  options      QuestionOption[]
+  statistics   QuestionStatistics?
+  reports      QuestionReport[]
+  examAnswers  ExamAnswer[]
+
+  @@index([topicId])
+  @@index([questionTypeId])
+  @@index([difficulty])
+  @@index([reviewStatus])
+  @@index([contentHash])
+  @@index([tags], type: Gin)
+  @@map("questions")
+}
+
+model QuestionOption {
+  id          String   @id @default(uuid()) @db.Uuid
+  questionId  String   @map("question_id") @db.Uuid
+  optionLabel String   @map("option_label") @db.VarChar(5)
+  optionText  String   @map("option_text") @db.Text
+  isCorrect   Boolean  @default(false) @map("is_correct")
+  orderIndex  Int      @map("order_index")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  // Relations
+  question Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@unique([questionId, optionLabel])
+  @@index([questionId])
+  @@map("question_options")
+}
+
+model QuestionStatistics {
+  questionId        String    @id @map("question_id") @db.Uuid
+  totalAttempts     Int       @default(0) @map("total_attempts")
+  correctAttempts   Int       @default(0) @map("correct_attempts")
+  averageTimeSeconds Int      @default(0) @map("average_time_seconds")
+  lastAttemptedAt   DateTime? @map("last_attempted_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  question Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@map("question_statistics")
+}
+
+model QuestionReport {
+  id          Int          @id @default(autoincrement())
+  questionId  String       @map("question_id") @db.Uuid
+  userId      Int          @map("user_id")
+  reportType  ReportType   @map("report_type")
+  description String       @db.Text
+  status      ReportStatus @default(pending)
+  resolvedAt  DateTime?    @map("resolved_at")
+  createdAt   DateTime     @default(now()) @map("created_at")
+
+  // Relations
+  question Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id])
+
+  @@index([questionId])
+  @@index([userId])
+  @@index([status])
+  @@map("question_reports")
+}
+
+enum Difficulty {
+  easy
+  medium
+  hard
+  expert
+}
+
+enum ReviewStatus {
+  pending
+  approved
+  rejected
+  needs_revision
+}
+
+enum ReportType {
+  incorrect_answer
+  unclear_question
+  outdated_content
+  typo
+  other
+}
+
+enum ReportStatus {
+  pending
+  reviewed
+  resolved
+  dismissed
+}
+
+// ============================================================================
+// EXAMS
+// ============================================================================
+
+model Exam {
+  id              String     @id @default(uuid()) @db.Uuid
+  userId          Int?       @map("user_id")
+  sessionId       String?    @map("session_id") @db.VarChar(100) // For anonymous users
+  certificationId Int        @map("certification_id")
+  title           String     @db.VarChar(255)
+  description     String?    @db.Text
+  mode            ExamMode   @default(practice)
+  questionCount   Int        @map("question_count")
+  timeLimit       Int        @map("time_limit") // minutes
+  passingScore    Decimal    @default(70) @map("passing_score") @db.Decimal(5, 2)
+  status          ExamStatus @default(pending)
+  score           Decimal?   @db.Decimal(5, 2)
+  passed          Boolean?
+  currentIndex    Int        @default(0) @map("current_index")
+  settings        Json       @default("{}")
+  startedAt       DateTime?  @map("started_at")
+  completedAt     DateTime?  @map("completed_at")
+  pausedAt        DateTime?  @map("paused_at")
+  totalPausedTime Int        @default(0) @map("total_paused_time") // seconds
+  createdAt       DateTime   @default(now()) @map("created_at")
+  updatedAt       DateTime   @updatedAt @map("updated_at")
+
+  // Relations
+  user          User?         @relation(fields: [userId], references: [id])
+  certification Certification @relation(fields: [certificationId], references: [id])
+  answers       ExamAnswer[]
+
+  @@index([userId])
+  @@index([sessionId])
+  @@index([certificationId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("exams")
+}
+
+model ExamAnswer {
+  id           String    @id @default(uuid()) @db.Uuid
+  examId       String    @map("exam_id") @db.Uuid
+  questionId   String    @map("question_id") @db.Uuid
+  orderIndex   Int       @map("order_index")
+  userAnswer   Json?     @map("user_answer") // Array of selected option indices
+  isCorrect    Boolean?  @map("is_correct")
+  timeSpent    Int       @default(0) @map("time_spent") // seconds
+  flagged      Boolean   @default(false)
+  answeredAt   DateTime? @map("answered_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  // Relations
+  exam     Exam     @relation(fields: [examId], references: [id], onDelete: Cascade)
+  question Question @relation(fields: [questionId], references: [id])
+
+  @@unique([examId, questionId])
+  @@index([examId])
+  @@index([questionId])
+  @@map("exam_answers")
+}
+
+enum ExamMode {
+  practice
+  timed
+  review
+  simulation
+}
+
+enum ExamStatus {
+  pending
+  active
+  paused
+  completed
+  abandoned
+}
+
+// ============================================================================
+// ADDITIONAL TABLES FOR FUTURE FEATURES
+// ============================================================================
+
+model AuditLog {
+  id         BigInt   @id @default(autoincrement())
+  userId     Int?     @map("user_id")
+  action     String   @db.VarChar(100)
+  entityType String   @map("entity_type") @db.VarChar(50)
+  entityId   String   @map("entity_id") @db.VarChar(100)
+  oldValues  Json?    @map("old_values")
+  newValues  Json?    @map("new_values")
+  ipAddress  String?  @map("ip_address") @db.VarChar(45)
+  userAgent  String?  @map("user_agent") @db.VarChar(500)
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
