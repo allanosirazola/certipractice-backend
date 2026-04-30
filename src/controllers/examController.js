@@ -1184,6 +1184,163 @@ const resumeExam = async (req, res) => {
   }
 };
 
+// NUEVO: Cancelar examen (abandonar sin completar)
+const cancelExam = async (req, res) => {
+  try {
+    const userId = req.user ? req.user.id : null;
+    const sessionId = req.sessionId || null;
+    
+    const exam = await ExamService.getExamById(req.params.id, userId, sessionId);
+    
+    if (!exam) {
+      return res.status(404).json({
+        success: false,
+        error: 'Exam not found'
+      });
+    }
+
+    if (!exam.belongsTo(userId, sessionId)) {
+      return res.status(403).json({
+        success: false,
+        error: 'Unauthorized to access this exam'
+      });
+    }
+
+    // Solo se pueden cancelar exámenes activos, pausados o pendientes
+    const cancelableStatuses = ['pending', 'active', 'in_progress', 'paused'];
+    if (!cancelableStatuses.includes(exam.status)) {
+      return res.status(400).json({
+        success: false,
+        error: `Cannot cancel exam with status: ${exam.status}`
+      });
+    }
+
+    // Actualizar estado a cancelado en la base de datos
+    const client = await ExamService.pool.connect();
+    try {
+      await client.query(`
+        UPDATE exams 
+        SET status = 'cancelled', 
+            updated_at = CURRENT_TIMESTAMP,
+            completed_at = CURRENT_TIMESTAMP
+        WHERE id = $1
+      `, [req.params.id]);
+      
+      logger.info(`Exam cancelled: ${req.params.id} by user: ${userId || sessionId}`);
+      
+      res.json({
+        success: true,
+        message: 'Exam cancelled successfully',
+        data: {
+          examId: exam.id,
+          status: 'cancelled',
+          cancelledAt: new Date().toISOString()
+        }
+      });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    logger.error('Cancel exam error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Server error while cancelling exam'
+    });
+  }
+};
+
+// NUEVO: Toggle flag en una pregunta (marcar para revisión)
+const toggleQuestionFlag = async (req, res) => {
+  try {
+    const userId = req.user ? req.user.id : null;
+    const sessionId = req.sessionId || null;
+    const examId = req.params.id;
+    const questionId = req.params.questionId || req.body.questionId;
+    
+    if (!questionId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Question ID is required'
+      });
+    }
+    
+    const exam = await ExamService.getExamById(examId, userId, sessionId);
+    
+    if (!exam) {
+      return res.status(404).json({
+        success: false,
+        error: 'Exam not found'
+      });
+    }
+
+    if (!exam.belongsTo(userId, sessionId)) {
+      return res.status(403).json({
+        success: false,
+        error: 'Unauthorized to access this exam'
+      });
+    }
+
+    // Solo se pueden marcar preguntas en exámenes activos
+    if (!['active', 'in_progress'].includes(exam.status)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Can only flag questions in active exams'
+      });
+    }
+
+    // Toggle flag en la base de datos
+    const client = await ExamService.pool.connect();
+    try {
+      // Verificar que la pregunta existe en el examen
+      const checkQuery = `
+        SELECT eq.id, COALESCE(ua.is_flagged, false) as is_flagged
+        FROM exam_questions eq
+        LEFT JOIN user_answers ua ON eq.id = ua.exam_question_id
+        WHERE eq.exam_id = $1 AND eq.question_id = $2
+      `;
+      const checkResult = await client.query(checkQuery, [examId, questionId]);
+      
+      if (checkResult.rows.length === 0) {
+        return res.status(404).json({
+          success: false,
+          error: 'Question not found in this exam'
+        });
+      }
+
+      const examQuestionId = checkResult.rows[0].id;
+      const currentFlag = checkResult.rows[0].is_flagged;
+      const newFlag = !currentFlag;
+
+      // Actualizar o crear el registro de respuesta con el flag
+      const upsertQuery = `
+        INSERT INTO user_answers (exam_question_id, is_flagged, answered_at)
+        VALUES ($1, $2, CURRENT_TIMESTAMP)
+        ON CONFLICT (exam_question_id) 
+        DO UPDATE SET is_flagged = $2, answered_at = CURRENT_TIMESTAMP
+        RETURNING is_flagged
+      `;
+      const result = await client.query(upsertQuery, [examQuestionId, newFlag]);
+      
+      res.json({
+        success: true,
+        data: {
+          questionId,
+          isFlagged: result.rows[0].is_flagged,
+          message: newFlag ? 'Question flagged for review' : 'Question unflagged'
+        }
+      });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    logger.error('Toggle question flag error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Server error while toggling question flag'
+    });
+  }
+};
+
 module.exports = {
   createExam,
   createFailedQuestionsExam,
@@ -1199,5 +1356,7 @@ module.exports = {
   getExamForReview,
   getExamStatistics,
   pauseExam,
-  resumeExam
+  resumeExam,
+  cancelExam,
+  toggleQuestionFlag
 };

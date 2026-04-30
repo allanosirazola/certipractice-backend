@@ -301,6 +301,339 @@ const getFailedQuestionsStats = async (req, res) => {
   }
 };
 
+// NEW: Get failed questions progress over time
+const getFailedQuestionsProgress = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { provider, certification, timeframe = 'month' } = req.query;
+
+    let intervalDays;
+    switch (timeframe) {
+      case 'week': intervalDays = 7; break;
+      case 'month': intervalDays = 30; break;
+      case 'all': intervalDays = 365; break;
+      default: intervalDays = 30;
+    }
+
+    let whereConditions = ['e.user_id = $1', 'e.status = $2'];
+    let queryParams = [userId, 'completed'];
+    let paramIndex = 3;
+
+    if (provider) {
+      whereConditions.push(`p.name = $${paramIndex}`);
+      queryParams.push(provider);
+      paramIndex++;
+    }
+
+    if (certification) {
+      whereConditions.push(`c.id = $${paramIndex}`);
+      queryParams.push(certification);
+      paramIndex++;
+    }
+
+    const whereClause = whereConditions.join(' AND ');
+
+    // Get progress over time
+    const progressQuery = `
+      SELECT 
+        DATE_TRUNC('day', ua.answered_at) as date,
+        COUNT(DISTINCT CASE WHEN ua.is_correct = false THEN q.id END) as failed_questions,
+        COUNT(DISTINCT CASE WHEN ua.is_correct = true THEN q.id END) as correct_questions,
+        COUNT(DISTINCT q.id) as total_questions
+      FROM user_answers ua
+      JOIN exam_questions eq ON ua.exam_question_id = eq.id
+      JOIN questions q ON eq.question_id = q.id
+      JOIN topics t ON q.topic_id = t.id
+      JOIN certifications c ON t.certification_id = c.id
+      JOIN providers p ON c.provider_id = p.id
+      JOIN exams e ON eq.exam_id = e.id
+      WHERE ${whereClause}
+        AND ua.answered_at >= NOW() - INTERVAL '${intervalDays} days'
+      GROUP BY DATE_TRUNC('day', ua.answered_at)
+      ORDER BY date
+    `;
+
+    // Get improvement stats (questions that were failed before but answered correctly recently)
+    const improvementQuery = `
+      WITH failed_questions AS (
+        SELECT DISTINCT q.id as question_id
+        FROM user_answers ua
+        JOIN exam_questions eq ON ua.exam_question_id = eq.id
+        JOIN questions q ON eq.question_id = q.id
+        JOIN topics t ON q.topic_id = t.id
+        JOIN certifications c ON t.certification_id = c.id
+        JOIN providers p ON c.provider_id = p.id
+        JOIN exams e ON eq.exam_id = e.id
+        WHERE ${whereClause} AND ua.is_correct = false
+      ),
+      recently_correct AS (
+        SELECT DISTINCT q.id as question_id
+        FROM user_answers ua
+        JOIN exam_questions eq ON ua.exam_question_id = eq.id
+        JOIN questions q ON eq.question_id = q.id
+        JOIN topics t ON q.topic_id = t.id
+        JOIN certifications c ON t.certification_id = c.id
+        JOIN providers p ON c.provider_id = p.id
+        JOIN exams e ON eq.exam_id = e.id
+        WHERE ${whereClause} 
+          AND ua.is_correct = true
+          AND ua.answered_at >= NOW() - INTERVAL '${intervalDays} days'
+      )
+      SELECT 
+        (SELECT COUNT(*) FROM failed_questions) as total_failed,
+        (SELECT COUNT(*) FROM recently_correct WHERE question_id IN (SELECT question_id FROM failed_questions)) as improved,
+        (SELECT COUNT(*) FROM failed_questions WHERE question_id NOT IN (SELECT question_id FROM recently_correct)) as still_struggling
+    `;
+
+    const [progressResult, improvementResult] = await Promise.all([
+      ExamService.pool.query(progressQuery, queryParams),
+      ExamService.pool.query(improvementQuery, queryParams)
+    ]);
+
+    const improvement = improvementResult.rows[0] || { total_failed: 0, improved: 0, still_struggling: 0 };
+
+    res.json({
+      success: true,
+      data: {
+        timeframe,
+        dailyProgress: progressResult.rows,
+        improvement: {
+          totalFailed: parseInt(improvement.total_failed) || 0,
+          improved: parseInt(improvement.improved) || 0,
+          stillStruggling: parseInt(improvement.still_struggling) || 0,
+          improvementRate: improvement.total_failed > 0 
+            ? ((improvement.improved / improvement.total_failed) * 100).toFixed(1)
+            : 0
+        }
+      }
+    });
+  } catch (error) {
+    logger.error('Get failed questions progress error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get failed questions progress'
+    });
+  }
+};
+
+// NEW: Mark a question as failed (manual tracking)
+const markQuestionAsFailed = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { questionId, examId } = req.body;
+
+    if (!questionId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Question ID is required'
+      });
+    }
+
+    // Verify question exists
+    const questionCheck = await ExamService.pool.query(
+      'SELECT id FROM questions WHERE id = $1 AND is_active = true',
+      [questionId]
+    );
+
+    if (questionCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Question not found'
+      });
+    }
+
+    // Log this as a failed attempt (could be tracked in a separate user_failed_questions table)
+    // For now, we'll use the audit log
+    await ExamService.pool.query(`
+      INSERT INTO audit_log (user_id, action, entity_type, entity_id, metadata, created_at)
+      VALUES ($1, 'mark_failed', 'question', $2, $3, CURRENT_TIMESTAMP)
+    `, [userId, questionId, JSON.stringify({ examId, markedManually: true })]);
+
+    res.json({
+      success: true,
+      message: 'Question marked as failed',
+      data: { questionId, markedAt: new Date().toISOString() }
+    });
+  } catch (error) {
+    logger.error('Mark question as failed error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to mark question'
+    });
+  }
+};
+
+// NEW: Remove question from failed list (mastered)
+const removeFromFailedQuestions = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { questionId } = req.params;
+
+    if (!questionId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Question ID is required'
+      });
+    }
+
+    // Log the removal
+    await ExamService.pool.query(`
+      INSERT INTO audit_log (user_id, action, entity_type, entity_id, metadata, created_at)
+      VALUES ($1, 'remove_from_failed', 'question', $2, $3, CURRENT_TIMESTAMP)
+    `, [userId, questionId, JSON.stringify({ removedManually: true })]);
+
+    res.json({
+      success: true,
+      message: 'Question removed from failed list',
+      data: { questionId, removedAt: new Date().toISOString() }
+    });
+  } catch (error) {
+    logger.error('Remove from failed questions error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to remove question from failed list'
+    });
+  }
+};
+
+// NEW: Get study recommendations based on performance
+const getStudyRecommendations = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { provider, certification } = req.query;
+
+    let whereConditions = ['e.user_id = $1', 'e.status = $2'];
+    let queryParams = [userId, 'completed'];
+    let paramIndex = 3;
+
+    if (provider) {
+      whereConditions.push(`p.name = $${paramIndex}`);
+      queryParams.push(provider);
+      paramIndex++;
+    }
+
+    if (certification) {
+      whereConditions.push(`c.id = $${paramIndex}`);
+      queryParams.push(certification);
+      paramIndex++;
+    }
+
+    const whereClause = whereConditions.join(' AND ');
+
+    // Find weak topics (lowest accuracy)
+    const weakTopicsQuery = `
+      SELECT 
+        t.id as topic_id,
+        t.name as topic_name,
+        c.name as certification_name,
+        COUNT(ua.id) as total_attempts,
+        SUM(CASE WHEN ua.is_correct THEN 1 ELSE 0 END) as correct,
+        ROUND(AVG(CASE WHEN ua.is_correct THEN 100.0 ELSE 0.0 END), 1) as accuracy,
+        (SELECT COUNT(*) FROM questions q2 WHERE q2.topic_id = t.id AND q2.is_active = true) as available_questions
+      FROM user_answers ua
+      JOIN exam_questions eq ON ua.exam_question_id = eq.id
+      JOIN questions q ON eq.question_id = q.id
+      JOIN topics t ON q.topic_id = t.id
+      JOIN certifications c ON t.certification_id = c.id
+      JOIN providers p ON c.provider_id = p.id
+      JOIN exams e ON eq.exam_id = e.id
+      WHERE ${whereClause}
+      GROUP BY t.id, t.name, c.name
+      HAVING COUNT(ua.id) >= 3
+      ORDER BY accuracy ASC
+      LIMIT 5
+    `;
+
+    // Find recommended question count per topic
+    const recommendedPracticeQuery = `
+      SELECT 
+        t.id as topic_id,
+        t.name as topic_name,
+        ROUND(AVG(CASE WHEN ua.is_correct THEN 100.0 ELSE 0.0 END), 1) as accuracy,
+        CASE 
+          WHEN AVG(CASE WHEN ua.is_correct THEN 100.0 ELSE 0.0 END) < 50 THEN 20
+          WHEN AVG(CASE WHEN ua.is_correct THEN 100.0 ELSE 0.0 END) < 70 THEN 15
+          WHEN AVG(CASE WHEN ua.is_correct THEN 100.0 ELSE 0.0 END) < 85 THEN 10
+          ELSE 5
+        END as recommended_questions
+      FROM user_answers ua
+      JOIN exam_questions eq ON ua.exam_question_id = eq.id
+      JOIN questions q ON eq.question_id = q.id
+      JOIN topics t ON q.topic_id = t.id
+      JOIN certifications c ON t.certification_id = c.id
+      JOIN providers p ON c.provider_id = p.id
+      JOIN exams e ON eq.exam_id = e.id
+      WHERE ${whereClause}
+      GROUP BY t.id, t.name
+      ORDER BY accuracy ASC
+      LIMIT 10
+    `;
+
+    // Get overall readiness score
+    const readinessQuery = `
+      SELECT 
+        COALESCE(AVG(e.score), 0) as average_score,
+        COUNT(DISTINCT e.id) as exams_taken,
+        SUM(CASE WHEN e.passed THEN 1 ELSE 0 END) as exams_passed
+      FROM exams e
+      JOIN certifications c ON e.certification_id = c.id
+      JOIN providers p ON c.provider_id = p.id
+      WHERE ${whereClause}
+    `;
+
+    const [weakTopics, recommendedPractice, readiness] = await Promise.all([
+      ExamService.pool.query(weakTopicsQuery, queryParams),
+      ExamService.pool.query(recommendedPracticeQuery, queryParams),
+      ExamService.pool.query(readinessQuery, queryParams)
+    ]);
+
+    const readinessData = readiness.rows[0] || { average_score: 0, exams_taken: 0, exams_passed: 0 };
+    const readinessScore = Math.min(100, Math.round(
+      (parseFloat(readinessData.average_score) * 0.6) + 
+      (Math.min(readinessData.exams_taken, 10) * 2) + 
+      (readinessData.exams_passed * 5)
+    ));
+
+    res.json({
+      success: true,
+      data: {
+        weakTopics: weakTopics.rows.map(row => ({
+          topicId: row.topic_id,
+          topicName: row.topic_name,
+          certificationName: row.certification_name,
+          accuracy: parseFloat(row.accuracy),
+          totalAttempts: parseInt(row.total_attempts),
+          availableQuestions: parseInt(row.available_questions),
+          priority: row.accuracy < 50 ? 'high' : row.accuracy < 70 ? 'medium' : 'low'
+        })),
+        recommendedPractice: recommendedPractice.rows.map(row => ({
+          topicId: row.topic_id,
+          topicName: row.topic_name,
+          currentAccuracy: parseFloat(row.accuracy),
+          recommendedQuestions: parseInt(row.recommended_questions)
+        })),
+        readiness: {
+          score: readinessScore,
+          averageExamScore: parseFloat(readinessData.average_score).toFixed(1),
+          examsTaken: parseInt(readinessData.exams_taken),
+          examsPassed: parseInt(readinessData.exams_passed),
+          recommendation: readinessScore >= 80 
+            ? 'You are well-prepared for the certification exam!'
+            : readinessScore >= 60 
+              ? 'Keep practicing, you are getting close!'
+              : 'Focus on your weak areas before attempting the certification.'
+        }
+      }
+    });
+  } catch (error) {
+    logger.error('Get study recommendations error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get study recommendations'
+    });
+  }
+};
+
 // Admin endpoints
 const getAllUsers = async (req, res) => {
   try {
@@ -627,6 +960,10 @@ module.exports = {
   getUserActivity,
   getFailedQuestions,
   getFailedQuestionsStats,
+  getFailedQuestionsProgress,
+  markQuestionAsFailed,
+  removeFromFailedQuestions,
+  getStudyRecommendations,
   getAllUsers,
   getUserById,
   updateUserRole,

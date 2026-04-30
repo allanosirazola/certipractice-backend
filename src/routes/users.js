@@ -7,6 +7,10 @@ const {
   getUserActivity,
   getFailedQuestions,
   getFailedQuestionsStats,
+  getFailedQuestionsProgress,
+  markQuestionAsFailed,
+  removeFromFailedQuestions,
+  getStudyRecommendations,
   getAllUsers,
   getUserById,
   updateUserRole,
@@ -26,12 +30,18 @@ router.get('/bookmarks', auth, getUserBookmarks);
 router.get('/error-responses', auth, getUserErrorResponses);
 router.get('/activity', auth, getUserActivity);
 
-// NEW: Failed questions routes (authenticated users only)
+// Failed questions routes (authenticated users only)
 router.get('/failed-questions', auth, getFailedQuestions);
 router.get('/failed-questions/stats', auth, getFailedQuestionsStats);
+router.get('/failed-questions/progress', auth, getFailedQuestionsProgress);
+router.post('/failed-questions', auth, markQuestionAsFailed);
+router.delete('/failed-questions/:questionId', auth, removeFromFailedQuestions);
 
-// Admin and instructor routes
-router.get('/', adminAuth, getAllUsers);
+// Study recommendations
+router.get('/study-recommendations', auth, getStudyRecommendations);
+
+// Admin routes - must come before /:id to avoid conflicts
+router.get('/admin', adminAuth, getAllUsers);
 router.get('/role/:role', instructorAuth, getUsersByRole);
 
 // Individual user management (admin only or own data)

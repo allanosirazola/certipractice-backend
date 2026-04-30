@@ -15,15 +15,14 @@ const {
   getExamStatistics,
   pauseExam,
   resumeExam,
+  cancelExam,
+  toggleQuestionFlag,
   getExamForReview 
 } = require('../controllers/examController');
 const { auth, optionalAuth } = require('../middleware/auth');
 const { validateExamAccess } = require('../middleware/examMiddleware');
 
 const router = express.Router();
-
-// Middleware para validar acceso a exámenes (si existe)
-// router.use('/:id', validateExamAccess);
 
 // === RUTAS PRINCIPALES ===
 
@@ -53,11 +52,18 @@ router.post('/:id/pause', optionalAuth, pauseExam);
 // Reanudar examen pausado
 router.post('/:id/resume', optionalAuth, resumeExam);
 
+// Cancelar examen
+router.post('/:id/cancel', optionalAuth, cancelExam);
+
 // Enviar respuesta a una pregunta
 router.post('/:id/answer', optionalAuth, submitAnswer);
 
 // Completar examen
 router.post('/:id/complete', optionalAuth, completeExam);
+
+// Toggle flag en una pregunta
+router.post('/:id/flag', optionalAuth, toggleQuestionFlag);
+router.post('/:id/questions/:questionId/flag', optionalAuth, toggleQuestionFlag);
 
 // === RUTAS DE INFORMACIÓN Y ANÁLISIS ===
 
@@ -67,7 +73,7 @@ router.get('/:id/progress', optionalAuth, getExamProgress);
 // Obtener resultados del examen completado
 router.get('/:id/results', optionalAuth, getExamResults);
 
-// Obtener estadísticas detalladas del examen (NUEVO)
+// Obtener estadísticas detalladas del examen
 router.get('/:id/statistics', optionalAuth, getExamStatistics);
 
 // === RUTAS DE UTILIDAD ===

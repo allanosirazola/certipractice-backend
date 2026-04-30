@@ -472,6 +472,42 @@ const logout = async (req, res) => {
   }
 };
 
+const verifyToken = async (req, res) => {
+  try {
+    // Token is already verified by auth middleware
+    // Get fresh user data
+    const user = await UserService.getUserById(req.user.id);
+    
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        error: 'User not found'
+      });
+    }
+
+    if (!user.is_active) {
+      return res.status(401).json({
+        success: false,
+        error: 'Account is deactivated'
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        valid: true,
+        user: user.toJSON()
+      }
+    });
+  } catch (error) {
+    logger.error('Verify token error:', error);
+    res.status(401).json({
+      success: false,
+      error: 'Invalid token'
+    });
+  }
+};
+
 module.exports = {
   register,
   login,
@@ -481,5 +517,6 @@ module.exports = {
   deleteAccount,
   refreshToken,
   validateEmail,
-  logout
+  logout,
+  verifyToken
 };

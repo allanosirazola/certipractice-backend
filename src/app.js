@@ -18,6 +18,7 @@ const examRoutes = require('./routes/exams');
 const userRoutes = require('./routes/users');
 const statsRoutes = require('./routes/stats');
 const healthRoutes = require('./routes/health');
+const analyticsRoutes = require('./routes/analytics');
 
 const app = express();
 
@@ -133,6 +134,7 @@ app.use('/api/questions', questionRoutes);
 app.use('/api/exams', examRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/stats', statsRoutes);
+app.use('/api/analytics', analyticsRoutes);
 
 // API version prefix (optional, for future versioning)
 app.use('/api/v1/auth', authRoutes);
@@ -140,6 +142,7 @@ app.use('/api/v1/questions', questionRoutes);
 app.use('/api/v1/exams', examRoutes);
 app.use('/api/v1/users', userRoutes);
 app.use('/api/v1/stats', statsRoutes);
+app.use('/api/v1/analytics', analyticsRoutes);
 
 // Error handling
 app.use(notFoundHandler);
