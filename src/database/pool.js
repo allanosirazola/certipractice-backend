@@ -4,15 +4,25 @@ const logger = require('../utils/logger');
 
 class DatabasePool {
   constructor() {
+    // Railway y otros servicios usan DATABASE_URL
+    const connectionConfig = process.env.DATABASE_URL 
+      ? {
+          connectionString: process.env.DATABASE_URL,
+          ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+        }
+      : {
+          user: process.env.DB_USER || 'postgres',
+          host: process.env.DB_HOST || 'localhost',
+          database: process.env.DB_NAME || 'exam_system',
+          password: process.env.DB_PASSWORD,
+          port: parseInt(process.env.DB_PORT) || 5432,
+        };
+
     this.pool = new Pool({
-      user: process.env.DB_USER || 'postgres',
-      host: process.env.DB_HOST || 'localhost',
-      database: process.env.DB_NAME || 'exam_system',
-      password: process.env.DB_PASSWORD,
-      port: process.env.DB_PORT || 5432,
-      max: 20, // maximum number of clients in the pool
+      ...connectionConfig,
+      max: parseInt(process.env.DB_POOL_SIZE) || 10,
       idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 2000,
+      connectionTimeoutMillis: 5000,
     });
 
     this.pool.on('error', (err) => {
@@ -33,12 +43,16 @@ class DatabasePool {
     try {
       const result = await this.pool.query(text, params);
       const duration = Date.now() - start;
-      logger.debug('Executed query', { text, duration, rows: result.rowCount });
+      logger.debug('Executed query', { text: text.substring(0, 100), duration, rows: result.rowCount });
       return result;
     } catch (error) {
-      logger.error('Database query error', { text, error: error.message });
+      logger.error('Database query error', { text: text.substring(0, 100), error: error.message });
       throw error;
     }
+  }
+
+  async connect() {
+    return await this.pool.connect();
   }
 
   async getClient() {
