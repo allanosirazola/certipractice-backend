@@ -1,8 +1,117 @@
 // src/middleware/rateLimit.js - Rate limiting middleware
 const rateLimit = require('express-rate-limit');
 const logger = require('../utils/logger');
+const config = require('../config/config');
 
-// General rate limit for API endpoints
+/**
+ * In-memory store with automatic cleanup of expired entries
+ */
+class MemoryStoreWithCleanup {
+  constructor(windowMs = 60000) {
+    this.windowMs = windowMs;
+    this.hits = new Map();
+    this.cleanupInterval = null;
+
+    // Only set up cleanup interval outside test env
+    if (process.env.NODE_ENV !== 'test') {
+      this.cleanupInterval = setInterval(() => this.cleanup(), windowMs);
+      // Don't keep process alive solely for the interval
+      if (this.cleanupInterval.unref) this.cleanupInterval.unref();
+    }
+  }
+
+  increment(key) {
+    const now = Date.now();
+    const record = this.hits.get(key) || { count: 0, resetAt: now + this.windowMs };
+
+    // Reset if window expired
+    if (now >= record.resetAt) {
+      record.count = 0;
+      record.resetAt = now + this.windowMs;
+    }
+
+    record.count++;
+    this.hits.set(key, record);
+
+    return {
+      totalHits: record.count,
+      resetTime: new Date(record.resetAt),
+    };
+  }
+
+  decrement(key) {
+    const record = this.hits.get(key);
+    if (record && record.count > 0) {
+      record.count--;
+      this.hits.set(key, record);
+    }
+  }
+
+  resetKey(key) {
+    this.hits.delete(key);
+  }
+
+  resetAll() {
+    this.hits.clear();
+  }
+
+  cleanup() {
+    const now = Date.now();
+    for (const [key, record] of this.hits.entries()) {
+      if (now >= record.resetAt) {
+        this.hits.delete(key);
+      }
+    }
+  }
+
+  shutdown() {
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+      this.cleanupInterval = null;
+    }
+    this.hits.clear();
+  }
+}
+
+/**
+ * Default key generator: prefer user, then session, then IP
+ */
+const defaultKeyGenerator = (req) => {
+  if (req.user?.id) return `user:${req.user.id}`;
+  if (req.sessionId) return `session:${req.sessionId}`;
+  return `ip:${req.ip || 'unknown'}`;
+};
+
+/**
+ * Create a rate limiter with sensible defaults
+ */
+const createRateLimiter = (options = {}) => {
+  const cfg = config.rateLimit || {};
+  const windowMs = options.windowMs || cfg.windowMs || 15 * 60 * 1000;
+  const max = options.max || cfg.max || 100;
+
+  return rateLimit({
+    windowMs,
+    max,
+    standardHeaders: options.standardHeaders ?? cfg.standardHeaders ?? true,
+    legacyHeaders: options.legacyHeaders ?? cfg.legacyHeaders ?? false,
+    keyGenerator: options.keyGenerator || defaultKeyGenerator,
+    skip: options.skip || ((req) => req.user?.isAdmin === true),
+    handler: options.handler || ((req, res) => {
+      logger.warn(`Rate limit exceeded for ${defaultKeyGenerator(req)} on ${req.path}`);
+      res.status(429).json({
+        success: false,
+        error: {
+          code: 'RATE_LIMITED',
+          message: options.message || 'Too many requests, please try again later.',
+        },
+      });
+    }),
+    ...options,
+  });
+};
+
+// General rate limit for API endpoints (legacy alias)
 const createRateLimit = (options = {}) => {
   const defaultOptions = {
     windowMs: 15 * 60 * 1000, // 15 minutes
@@ -25,6 +134,39 @@ const createRateLimit = (options = {}) => {
   };
 
   return rateLimit({ ...defaultOptions, ...options });
+};
+
+// Pre-configured limiters
+const authRateLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: 'Too many authentication attempts. Please try again later.',
+});
+
+const examRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  max: 30,
+  message: 'Too many exam operations. Please slow down.',
+});
+
+const searchRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  max: 30,
+  message: 'Too many search requests.',
+});
+
+/**
+ * Adaptive rate limiter - adjusts based on user role/status
+ */
+const adaptiveRateLimiter = (req, res, next) => {
+  const cfg = config.rateLimit || { windowMs: 60000, max: 100 };
+  let max = cfg.max;
+  if (req.user?.role === 'admin') max = max * 10;
+  else if (req.user?.role === 'instructor') max = max * 5;
+  else if (req.user) max = max * 2;
+
+  const limiter = createRateLimiter({ windowMs: cfg.windowMs, max });
+  return limiter(req, res, next);
 };
 
 // Specific rate limits for different operations
@@ -236,5 +378,13 @@ module.exports = {
   createProgressiveRateLimit,
   createRateLimit,
   cleanupRateLimitStore,
-  stopCleanup
+  stopCleanup,
+  // New API
+  createRateLimiter,
+  MemoryStoreWithCleanup,
+  authRateLimiter,
+  examRateLimiter,
+  searchRateLimiter,
+  adaptiveRateLimiter,
+  defaultKeyGenerator
 };
