@@ -211,8 +211,19 @@ const cleanupRateLimitStore = () => {
   }
 };
 
-// Run cleanup every 30 minutes
-setInterval(cleanupRateLimitStore, 30 * 60 * 1000);
+// Run cleanup every 30 minutes (only in non-test environment)
+let cleanupInterval = null;
+if (process.env.NODE_ENV !== 'test') {
+  cleanupInterval = setInterval(cleanupRateLimitStore, 30 * 60 * 1000);
+}
+
+// Allow cleanup of interval for testing
+const stopCleanup = () => {
+  if (cleanupInterval) {
+    clearInterval(cleanupInterval);
+    cleanupInterval = null;
+  }
+};
 
 module.exports = {
   rateLimitMiddleware,
@@ -224,5 +235,6 @@ module.exports = {
   bulkOperationsRateLimit,
   createProgressiveRateLimit,
   createRateLimit,
-  cleanupRateLimitStore
+  cleanupRateLimitStore,
+  stopCleanup
 };

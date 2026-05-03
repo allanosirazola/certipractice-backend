@@ -4,7 +4,7 @@
  */
 
 const prisma = require('../lib/prisma');
-const bcrypt = require('bcrypt');
+const bcrypt = require('bcryptjs');
 const config = require('../config/config');
 
 class UserRepository {

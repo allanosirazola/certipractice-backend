@@ -46,23 +46,24 @@ const transports = [
 ];
 
 // Add file transport if configured
-if (config.logging.file) {
+const loggingConfig = config.logging || {};
+if (loggingConfig.file) {
   transports.push(
     new winston.transports.File({
-      filename: config.logging.file,
+      filename: loggingConfig.file,
       format: winston.format.combine(
         winston.format.uncolorize(),
         winston.format.json()
       ),
-      maxsize: config.logging.maxSize,
-      maxFiles: config.logging.maxFiles
+      maxsize: loggingConfig.maxSize,
+      maxFiles: loggingConfig.maxFiles
     })
   );
 }
 
 // Create logger instance
 const logger = winston.createLogger({
-  level: config.logging.level || 'info',
+  level: loggingConfig.level || 'info',
   levels,
   format,
   transports,
