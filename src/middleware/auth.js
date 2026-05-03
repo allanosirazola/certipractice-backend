@@ -171,8 +171,25 @@ const optionalAuth = async (req, res, next) => {
       try {
         const decoded = verifyToken(token);
         
-        // Get fresh user data from database
-        const user = await UserService.getUserById(decoded.id);
+        // Try to get fresh user from DB; fall back to token payload
+        let user;
+        try {
+          user = await UserService.getUserById(decoded.id);
+        } catch (err) {
+          user = null;
+        }
+        
+        // Fall back to decoded token data when no user from DB
+        if (!user && decoded.id) {
+          user = {
+            id: decoded.id,
+            username: decoded.username,
+            email: decoded.email,
+            role: decoded.role || 'student',
+            is_active: true,
+            is_validated: true
+          };
+        }
         
         if (user && user.is_active) {
           req.user = {
@@ -186,21 +203,16 @@ const optionalAuth = async (req, res, next) => {
             is_validated: user.is_validated
           };
           logger.debug('User authenticated:', user.username);
-        } else {
-          logger.warn('Token valid but user not found or inactive');
-          req.user = null;
         }
+        // If no user, leave req.user undefined (don't set to null)
       } catch (error) {
         logger.warn('Invalid token provided, treating as anonymous:', error.message);
-        req.user = null;
+        // Leave req.user undefined
       }
-    } else {
-      // No token provided, anonymous user
-      req.user = null;
     }
 
-    // Handle session ID for anonymous users
-    if (!req.user) {
+    // Handle session ID for anonymous users (only if response supports it)
+    if (!req.user && typeof res.setHeader === 'function') {
       // Look for session ID in various places
       let sessionId;
       if (typeof req.header === 'function') {
@@ -211,12 +223,10 @@ const optionalAuth = async (req, res, next) => {
       sessionId = sessionId || req.cookies?.sessionId || req.session?.id;
       
       if (!sessionId) {
-        // Generate new session ID
         sessionId = uuidv4();
         logger.debug('Generated new sessionId for anonymous user:', sessionId);
         
-        // Set session cookie if possible
-        if (res.cookie) {
+        if (typeof res.cookie === 'function' && config.session) {
           res.cookie('sessionId', sessionId, {
             httpOnly: true,
             secure: config.nodeEnv === 'production',
@@ -224,28 +234,22 @@ const optionalAuth = async (req, res, next) => {
             maxAge: config.session.maxAge
           });
         }
-        
-        // Set response header
-        res.setHeader('X-Session-Id', sessionId);
-      } else {
-        logger.debug('Using existing sessionId for anonymous user:', sessionId);
-        // Ensure session ID is in response header
-        res.setHeader('X-Session-Id', sessionId);
       }
       
+      res.setHeader('X-Session-Id', sessionId);
       req.sessionId = sessionId;
-    } else {
-      // Authenticated user doesn't need session ID
+    } else if (req.user) {
       req.sessionId = null;
     }
 
     next();
   } catch (error) {
     logger.error('Optional auth middleware error:', error);
-    // In case of error, continue as anonymous
-    req.user = null;
-    req.sessionId = uuidv4();
-    res.setHeader('X-Session-Id', req.sessionId);
+    // In case of error, continue gracefully
+    if (typeof res.setHeader === 'function') {
+      req.sessionId = uuidv4();
+      res.setHeader('X-Session-Id', req.sessionId);
+    }
     next();
   }
 };
