@@ -133,29 +133,75 @@ class Database {
     }
   }
 
+  /**
+   * Get the current pool instance (or null if not connected)
+   */
+  getPool() {
+    return this.pool || null;
+  }
+
+  /**
+   * Build the pool configuration object from environment/config
+   * Used for inspection and testing
+   */
+  getPoolConfig() {
+    return {
+      host: process.env.DB_HOST || config.database.host || 'localhost',
+      port: parseInt(process.env.DB_PORT) || config.database.port || 5432,
+      database: process.env.DB_NAME || config.database.database || 'exam_system',
+      user: process.env.DB_USER || config.database.username || 'postgres',
+      password: process.env.DB_PASSWORD || config.database.password || '',
+      max: config.database.pool.max || 20,
+      min: config.database.pool.min || 2,
+      idleTimeoutMillis: config.database.pool.idleTimeoutMillis || config.database.pool.idle || 10000,
+      connectionTimeoutMillis: config.database.pool.connectionTimeoutMillis || config.database.pool.acquire || 5000,
+      application_name: 'exam_system',
+      ssl: config.database.ssl || false,
+    };
+  }
+
   // Health check method
   async healthCheck() {
+    if (!this.pool) {
+      return {
+        status: 'unhealthy',
+        error: 'Pool not initialized',
+        pool: { total: 0, idle: 0, waiting: 0 },
+      };
+    }
+
     try {
-      const result = await this.query('SELECT 1 as health_check, NOW() as timestamp');
+      const result = await this.pool.query('SELECT 1 as health_check, NOW() as timestamp');
       return {
         status: 'healthy',
         timestamp: result.rows[0].timestamp,
+        pool: {
+          total: this.pool.totalCount || 0,
+          idle: this.pool.idleCount || 0,
+          waiting: this.pool.waitingCount || 0,
+        },
+        // Legacy alias
         connections: {
-          total: this.pool?.totalCount || 0,
-          idle: this.pool?.idleCount || 0,
-          waiting: this.pool?.waitingCount || 0
-        }
+          total: this.pool.totalCount || 0,
+          idle: this.pool.idleCount || 0,
+          waiting: this.pool.waitingCount || 0,
+        },
       };
     } catch (error) {
       logger.error('Database health check failed:', error);
       return {
         status: 'unhealthy',
         error: error.message,
+        pool: {
+          total: this.pool?.totalCount || 0,
+          idle: this.pool?.idleCount || 0,
+          waiting: this.pool?.waitingCount || 0,
+        },
         connections: {
           total: this.pool?.totalCount || 0,
           idle: this.pool?.idleCount || 0,
-          waiting: this.pool?.waitingCount || 0
-        }
+          waiting: this.pool?.waitingCount || 0,
+        },
       };
     }
   }

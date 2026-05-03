@@ -23,7 +23,7 @@ const colors = {
   silly: 'grey'
 };
 
-winston.addColors(colors);
+winston.addColors && winston.addColors(colors);
 
 // Define log format
 const format = winston.format.combine(
