@@ -1,6 +1,7 @@
 const ExamService = require('../services/examService');
 const Exam = require('../models/Exam');
 const logger = require('../utils/logger');
+const telemetry = require('../services/telemetryService');
 
 const createExam = async (req, res) => {
   try {
@@ -81,6 +82,19 @@ const createExam = async (req, res) => {
     if (!userId && sessionId) {
       res.setHeader('X-Session-Id', sessionId);
     }
+
+    // Telemetry: track exam creation (fire-and-forget)
+    telemetry.trackExamEvent({
+      examId: exam.id,
+      eventType: 'exam_created',
+      req,
+      metadata: {
+        provider: exam.provider,
+        certification: exam.certification,
+        mode: exam.mode,
+        questionCount: exam.questionCount || exam.questions?.length,
+      },
+    }).catch(() => {});
 
     res.status(201).json({
       success: true,
@@ -479,6 +493,14 @@ const startExam = async (req, res) => {
       explanation: undefined
     }));
 
+    // Telemetry: track exam start
+    telemetry.trackExamEvent({
+      examId: exam.id,
+      eventType: 'exam_started',
+      req,
+      metadata: { questionCount: examData.questions?.length, mode: exam.mode },
+    }).catch(() => {});
+
     res.json({
       success: true,
       data: examData,
@@ -580,6 +602,25 @@ const submitAnswer = async (req, res) => {
       sessionId
     );
 
+    // Telemetry: track answer + question event
+    telemetry.trackExamEvent({
+      examId: req.params.id,
+      eventType: 'exam_answer_submitted',
+      req,
+      metadata: {
+        questionId,
+        isCorrect: result?.isCorrect ?? null,
+      },
+    }).catch(() => {});
+    telemetry.trackQuestionEvent({
+      questionId,
+      eventType: 'answered',
+      isCorrect: result?.isCorrect ?? null,
+      timeSpent: result?.timeSpent ?? null,
+      req,
+      metadata: { examId: req.params.id },
+    }).catch(() => {});
+
     res.json({
       success: true,
       data: result,
@@ -641,6 +682,20 @@ const completeExam = async (req, res) => {
     const examData = exam.toJSON();
     const results = exam.getResults();
     const analysis = exam.getAnalysis();
+
+    // Telemetry: track exam completion
+    telemetry.trackExamEvent({
+      examId: exam.id,
+      eventType: 'exam_completed',
+      req,
+      metadata: {
+        score: exam.score,
+        passed: exam.passed,
+        timeSpent: exam.timeSpent,
+        totalQuestions: results?.totalQuestions,
+        correctAnswers: results?.correctAnswers,
+      },
+    }).catch(() => {});
 
     res.json({
       success: true,
@@ -1104,6 +1159,12 @@ const pauseExam = async (req, res) => {
           pausedAt: new Date().toISOString()
         }
       });
+
+      telemetry.trackExamEvent({
+        examId: exam.id,
+        eventType: 'exam_paused',
+        req,
+      }).catch(() => {});
     } finally {
       client.release();
     }
@@ -1172,6 +1233,12 @@ const resumeExam = async (req, res) => {
           timeRemaining: updatedExam.getTimeRemaining()
         }
       });
+
+      telemetry.trackExamEvent({
+        examId: exam.id,
+        eventType: 'exam_resumed',
+        req,
+      }).catch(() => {});
     } finally {
       client.release();
     }
@@ -1237,6 +1304,13 @@ const cancelExam = async (req, res) => {
           cancelledAt: new Date().toISOString()
         }
       });
+
+      telemetry.trackExamEvent({
+        examId: exam.id,
+        eventType: 'exam_cancelled',
+        req,
+        metadata: { previousStatus: exam.status },
+      }).catch(() => {});
     } finally {
       client.release();
     }
@@ -1329,6 +1403,13 @@ const toggleQuestionFlag = async (req, res) => {
           message: newFlag ? 'Question flagged for review' : 'Question unflagged'
         }
       });
+
+      telemetry.trackExamEvent({
+        examId,
+        eventType: newFlag ? 'exam_question_flagged' : 'exam_question_unflagged',
+        req,
+        metadata: { questionId },
+      }).catch(() => {});
     } finally {
       client.release();
     }

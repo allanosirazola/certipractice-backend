@@ -2,6 +2,7 @@
 const QuestionService = require('../services/questionService');
 const Question = require('../models/Question');
 const logger = require('../utils/logger');
+const telemetry = require('../services/telemetryService');
 
 const getQuestions = async (req, res) => {
   try {
@@ -101,6 +102,15 @@ const getQuestionById = async (req, res) => {
       success: true,
       data: responseData
     });
+
+    // Telemetry: track question view (only when not admin viewing with answers)
+    if (!shouldIncludeAnswers) {
+      telemetry.trackQuestionEvent({
+        questionId: id,
+        eventType: 'viewed',
+        req,
+      }).catch(() => {});
+    }
   } catch (error) {
     logger.error('Error in getQuestionById controller:', error);
     res.status(500).json({
@@ -473,6 +483,15 @@ const checkAnswer = async (req, res) => {
       success: true,
       data: response
     });
+
+    // Telemetry: track question answered (standalone, not in exam)
+    telemetry.trackQuestionEvent({
+      questionId: id,
+      eventType: 'answered',
+      isCorrect,
+      req,
+      metadata: { context: 'standalone_check' },
+    }).catch(() => {});
   } catch (error) {
     logger.error('Error in checkAnswer controller:', error);
     res.status(500).json({

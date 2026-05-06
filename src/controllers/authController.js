@@ -2,6 +2,7 @@ const UserService = require('../services/userService');
 const User = require('../models/User');
 const logger = require('../utils/logger');
 const config = require('../config/config');
+const telemetry = require('../services/telemetryService');
 
 const register = async (req, res) => {
   try {
@@ -60,6 +61,14 @@ const register = async (req, res) => {
         token
       }
     });
+
+    // Telemetry: track registration
+    telemetry.trackUserActivity({
+      activityType: 'registration',
+      req,
+      userId: user.id,
+      metadata: { username: user.username, email: user.email },
+    }).catch(() => {});
   } catch (error) {
     logger.error('Registration error:', error);
     
@@ -145,6 +154,14 @@ const login = async (req, res) => {
         token
       }
     });
+
+    // Telemetry: track login (fire-and-forget)
+    telemetry.trackUserActivity({
+      activityType: 'login',
+      req,
+      userId: user.id,
+      metadata: { username: user.username },
+    }).catch(() => {});
   } catch (error) {
     logger.error('Login error:', error);
     res.status(500).json({
@@ -463,6 +480,14 @@ const logout = async (req, res) => {
       success: true,
       message: 'Logout successful'
     });
+
+    // Telemetry: track logout
+    if (req.user) {
+      telemetry.trackUserActivity({
+        activityType: 'logout',
+        req,
+      }).catch(() => {});
+    }
   } catch (error) {
     logger.error('Logout error:', error);
     res.status(500).json({

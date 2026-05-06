@@ -340,3 +340,165 @@ model AuditLog {
   @@index([createdAt])
   @@map("audit_logs")
 }
+
+// ============================================================================
+// TELEMETRY / ANALYTICS TABLES
+// ============================================================================
+// Dedicated tables for high-volume analytics events.
+// Designed for time-series queries with appropriate indexes.
+// Anonymous users are tracked via sessionId (UUID v4).
+
+/// Tracks every exam lifecycle event: created, started, paused, resumed,
+/// completed, abandoned, cancelled. Allows reconstructing the full timeline
+/// of any exam attempt.
+model ExamEvent {
+  id         BigInt           @id @default(autoincrement())
+  examId     String           @map("exam_id") @db.Uuid
+  userId     Int?             @map("user_id")
+  sessionId  String?          @map("session_id") @db.VarChar(64)
+  eventType  ExamEventType    @map("event_type")
+  /// Free-form metadata: questionCount, mode, score, timeSpent, reason, etc.
+  metadata   Json?
+  /// Where the user was at the moment (which question index)
+  questionIndex Int?          @map("question_index")
+  ipAddress  String?          @map("ip_address") @db.VarChar(45)
+  userAgent  String?          @map("user_agent") @db.VarChar(500)
+  createdAt  DateTime         @default(now()) @map("created_at")
+
+  @@index([examId])
+  @@index([userId, createdAt])
+  @@index([sessionId, createdAt])
+  @@index([eventType, createdAt])
+  @@index([createdAt])
+  @@map("exam_events")
+}
+
+enum ExamEventType {
+  exam_created
+  exam_started
+  exam_paused
+  exam_resumed
+  exam_completed
+  exam_abandoned
+  exam_cancelled
+  exam_answer_submitted
+  exam_question_flagged
+  exam_question_unflagged
+  exam_question_viewed
+  exam_navigated
+}
+
+/// Tracks individual interactions with questions outside of exam context
+/// (random practice, search, browse, mark/unmark, report).
+model QuestionEvent {
+  id          BigInt              @id @default(autoincrement())
+  questionId  String              @map("question_id") @db.Uuid
+  userId      Int?                @map("user_id")
+  sessionId   String?             @map("session_id") @db.VarChar(64)
+  eventType   QuestionEventType   @map("event_type")
+  /// For 'answered' events: was the answer correct?
+  isCorrect   Boolean?            @map("is_correct")
+  /// Time the user spent on this question in seconds
+  timeSpent   Int?                @map("time_spent")
+  /// Optional context: examId, source page, search query
+  metadata    Json?
+  ipAddress   String?             @map("ip_address") @db.VarChar(45)
+  createdAt   DateTime            @default(now()) @map("created_at")
+
+  @@index([questionId, createdAt])
+  @@index([userId, createdAt])
+  @@index([sessionId, createdAt])
+  @@index([eventType, createdAt])
+  @@index([questionId, isCorrect])
+  @@index([createdAt])
+  @@map("question_events")
+}
+
+enum QuestionEventType {
+  viewed
+  answered
+  reported
+  bookmarked
+  unbookmarked
+  reviewed
+}
+
+/// Generic user activity log: logins, logouts, page views, searches.
+/// Use sparingly for cross-cutting events not covered by ExamEvent or QuestionEvent.
+model UserActivity {
+  id          BigInt           @id @default(autoincrement())
+  userId      Int?             @map("user_id")
+  sessionId   String?          @map("session_id") @db.VarChar(64)
+  activityType UserActivityType @map("activity_type")
+  /// Page path or referrer for navigation events
+  path        String?          @db.VarChar(500)
+  referrer    String?          @db.VarChar(500)
+  /// Free-form metadata
+  metadata    Json?
+  /// Duration in milliseconds (for sessions, page views)
+  durationMs  Int?             @map("duration_ms")
+  ipAddress   String?          @map("ip_address") @db.VarChar(45)
+  userAgent   String?          @map("user_agent") @db.VarChar(500)
+  createdAt   DateTime         @default(now()) @map("created_at")
+
+  @@index([userId, createdAt])
+  @@index([sessionId, createdAt])
+  @@index([activityType, createdAt])
+  @@index([createdAt])
+  @@map("user_activity")
+}
+
+enum UserActivityType {
+  login
+  logout
+  registration
+  page_view
+  search
+  navigation
+  session_start
+  session_end
+  feature_used
+  error_encountered
+}
+
+/// Pre-aggregated daily metrics for fast dashboard loading.
+/// Populated by a scheduled job (or recomputed on-demand).
+/// One row per day per metric category.
+model DailyMetrics {
+  id              BigInt   @id @default(autoincrement())
+  /// Date in YYYY-MM-DD (00:00:00 UTC)
+  date            DateTime @db.Date
+  /// Optional partition: 'global', 'cert:<id>', 'provider:<name>'
+  scope           String   @default("global") @db.VarChar(100)
+
+  // Exam metrics
+  examsCreated      Int @default(0) @map("exams_created")
+  examsStarted      Int @default(0) @map("exams_started")
+  examsCompleted    Int @default(0) @map("exams_completed")
+  examsAbandoned    Int @default(0) @map("exams_abandoned")
+  examsPassed       Int @default(0) @map("exams_passed")
+  /// Average score among completed exams (0-100)
+  averageScore      Float? @map("average_score")
+  /// Average time spent per completed exam, in seconds
+  averageTimeSpent  Int?   @map("average_time_spent")
+
+  // Question metrics
+  questionsViewed     Int @default(0) @map("questions_viewed")
+  questionsAnswered   Int @default(0) @map("questions_answered")
+  questionsCorrect    Int @default(0) @map("questions_correct")
+  questionsReported   Int @default(0) @map("questions_reported")
+
+  // User metrics
+  uniqueUsers       Int @default(0) @map("unique_users")
+  uniqueSessions    Int @default(0) @map("unique_sessions")
+  newUsers          Int @default(0) @map("new_users")
+  logins            Int @default(0) @map("logins")
+  pageViews         Int @default(0) @map("page_views")
+
+  computedAt        DateTime @default(now()) @map("computed_at")
+
+  @@unique([date, scope])
+  @@index([date])
+  @@index([scope, date])
+  @@map("daily_metrics")
+}
