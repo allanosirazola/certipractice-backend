@@ -33,6 +33,8 @@ model User {
   createdQuestions  Question[]       @relation("QuestionCreator")
   reviewedQuestions Question[]       @relation("QuestionReviewer")
   questionReports   QuestionReport[]
+  bookmarks         Bookmark[]
+  questionNotes     QuestionNote[]
 
   @@index([email])
   @@index([username])
@@ -152,6 +154,8 @@ model Question {
   statistics   QuestionStatistics?
   reports      QuestionReport[]
   examAnswers  ExamAnswer[]
+  bookmarks    Bookmark[]
+  notes        QuestionNote[]
 
   @@index([topicId])
   @@index([questionTypeId])
@@ -240,6 +244,46 @@ enum ReportStatus {
   reviewed
   resolved
   dismissed
+}
+
+// ============================================================================
+// USER ENGAGEMENT (bookmarks + personal notes)
+// ============================================================================
+
+/// User-saved question for later review.
+/// Acts like a "favorite": one row per (user, question) pair.
+model Bookmark {
+  id         BigInt   @id @default(autoincrement())
+  userId     Int      @map("user_id")
+  questionId String   @map("question_id") @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  question Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, questionId])
+  @@index([userId, createdAt])
+  @@index([questionId])
+  @@map("bookmarks")
+}
+
+/// Free-form personal note attached to a question.
+/// One note per (user, question) — UPSERT pattern.
+model QuestionNote {
+  id         BigInt   @id @default(autoincrement())
+  userId     Int      @map("user_id")
+  questionId String   @map("question_id") @db.Uuid
+  content    String   @db.Text
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  question Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, questionId])
+  @@index([userId, updatedAt])
+  @@index([questionId])
+  @@map("question_notes")
 }
 
 // ============================================================================
