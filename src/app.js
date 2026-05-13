@@ -22,6 +22,7 @@ const analyticsRoutes = require('./routes/analytics');
 const adminAnalyticsRoutes = require('./routes/adminAnalytics');
 const engagementRoutes = require('./routes/engagement');
 const searchRoutes = require('./routes/search');
+const progressRoutes = require('./routes/progress');
 
 // Telemetry middleware
 const { trackPageView } = require('./middleware/telemetry');
@@ -147,6 +148,7 @@ app.use('/api/analytics', analyticsRoutes);
 app.use('/api/admin/analytics', adminAnalyticsRoutes);
 app.use('/api/engagement', engagementRoutes);
 app.use('/api/search', searchRoutes);
+app.use('/api/progress', progressRoutes);
 
 // API version prefix (optional, for future versioning)
 app.use('/api/v1/auth', authRoutes);
@@ -158,6 +160,7 @@ app.use('/api/v1/analytics', analyticsRoutes);
 app.use('/api/v1/admin/analytics', adminAnalyticsRoutes);
 app.use('/api/v1/engagement', engagementRoutes);
 app.use('/api/v1/search', searchRoutes);
+app.use('/api/v1/progress', progressRoutes);
 
 // Error handling
 app.use(notFoundHandler);
