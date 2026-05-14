@@ -3,6 +3,8 @@ const User = require('../models/User');
 const logger = require('../utils/logger');
 const config = require('../config/config');
 const telemetry = require('../services/telemetryService');
+const emailService = require('../services/emailService');
+const pool = require('../database/pool');
 
 const register = async (req, res) => {
   try {
@@ -48,17 +50,49 @@ const register = async (req, res) => {
       role: userRole
     });
 
+    // Generate a verification token and persist it on the user row.
+    // 24h expiry — matches what most email providers expect.
+    const verificationToken = emailService.generateVerificationToken();
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    try {
+      await pool.query(
+        `UPDATE users
+            SET email_verified              = FALSE,
+                email_verification_token    = $1,
+                email_verification_expires  = $2
+          WHERE id = $3`,
+        [verificationToken, expiresAt, user.id]
+      );
+    } catch (err) {
+      // Don't fail the registration if updating the token fails —
+      // the user can request another via /resend-verification.
+      logger.warn('Failed to persist verification token:', err?.message);
+    }
+
+    // Detect preferred language from Accept-Language header (best-effort)
+    const langHeader = String(req.headers?.['accept-language'] || '').toLowerCase();
+    const lang = langHeader.startsWith('en') ? 'en' : 'es';
+
+    // Fire-and-forget — don't block the API response on the email transport
+    emailService.sendVerificationEmail({
+      to: user.email,
+      username: user.username,
+      token: verificationToken,
+      req,
+      lang,
+    }).catch((err) => logger.warn('sendVerificationEmail rejected:', err?.message));
+
     const token = user.generateToken();
 
-    // Log successful registration
-    logger.info(`User registered successfully: ${user.username} (${user.email})`);
+    logger.info(`User registered: ${user.username} (${user.email}) — verification pending`);
 
     res.status(201).json({
       success: true,
-      message: 'User registered successfully',
+      message: 'User registered successfully. Check your email to verify your account.',
       data: {
-        user: user.toJSON(),
-        token
+        user: { ...user.toJSON(), emailVerified: false },
+        token,
+        emailVerificationRequired: true,
       }
     });
 
@@ -533,6 +567,162 @@ const verifyToken = async (req, res) => {
   }
 };
 
+/**
+ * POST /api/auth/verify-email
+ *
+ * Body: { token: string }
+ *
+ * Checks the token against the user row, ensures it hasn't expired, and
+ * flips email_verified=true. Returns generic 400 for any failure mode
+ * (invalid/expired/used) so we don't leak whether a token existed.
+ */
+const verifyEmail = async (req, res) => {
+  try {
+    const { token } = req.body || {};
+    if (!token || typeof token !== 'string') {
+      return res.status(400).json({
+        success: false,
+        error: 'Token is required'
+      });
+    }
+
+    const result = await pool.query(
+      `SELECT id, email, username, email_verified, email_verification_expires
+         FROM users
+        WHERE email_verification_token = $1
+        LIMIT 1`,
+      [token]
+    );
+    const row = result.rows[0];
+    if (!row) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid or expired verification link'
+      });
+    }
+    if (row.email_verified) {
+      // Idempotent: clicking the link twice should not error
+      return res.json({
+        success: true,
+        message: 'Email already verified',
+        data: { alreadyVerified: true }
+      });
+    }
+    if (row.email_verification_expires && new Date(row.email_verification_expires) < new Date()) {
+      return res.status(400).json({
+        success: false,
+        error: 'Verification link has expired. Request a new one.',
+        code: 'TOKEN_EXPIRED'
+      });
+    }
+
+    await pool.query(
+      `UPDATE users
+          SET email_verified              = TRUE,
+              email_verification_token    = NULL,
+              email_verification_expires  = NULL,
+              updated_at                  = NOW()
+        WHERE id = $1`,
+      [row.id]
+    );
+
+    logger.info(`Email verified: ${row.username} (${row.email})`);
+    telemetry.trackUserActivity({
+      activityType: 'feature_used',
+      req,
+      userId: row.id,
+      metadata: { feature: 'email_verified' },
+    }).catch(() => {});
+
+    res.json({
+      success: true,
+      message: 'Email verified successfully',
+      data: { verified: true }
+    });
+  } catch (error) {
+    logger.error('verifyEmail error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+};
+
+/**
+ * POST /api/auth/resend-verification
+ *
+ * Body: { email?: string }   ← when called anonymously
+ *  …or the authenticated user implicitly (req.user.id)
+ *
+ * Issues a new token and re-sends the verification email. To prevent
+ * enumeration we always return success regardless of whether the address
+ * exists in the database.
+ */
+const resendVerification = async (req, res) => {
+  try {
+    // Prefer the authenticated user's email; fall back to the body for
+    // the case where someone is unauthenticated but knows their address.
+    const targetEmail = (req.user?.email
+      || req.body?.email
+      || '').toString().trim().toLowerCase();
+
+    if (!targetEmail) {
+      return res.status(400).json({
+        success: false,
+        error: 'Email is required'
+      });
+    }
+
+    const lookup = await pool.query(
+      `SELECT id, email, username, email_verified FROM users WHERE email = $1 LIMIT 1`,
+      [targetEmail]
+    );
+    const user = lookup.rows[0];
+
+    // Always return 200 to avoid leaking which emails exist
+    if (!user || user.email_verified) {
+      logger.info(`resendVerification — no-op for ${targetEmail} (missing or already verified)`);
+      return res.json({
+        success: true,
+        message: 'If an account exists with that email, a verification link has been sent.'
+      });
+    }
+
+    const verificationToken = emailService.generateVerificationToken();
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    await pool.query(
+      `UPDATE users
+          SET email_verification_token   = $1,
+              email_verification_expires = $2,
+              updated_at                 = NOW()
+        WHERE id = $3`,
+      [verificationToken, expiresAt, user.id]
+    );
+
+    const langHeader = String(req.headers?.['accept-language'] || '').toLowerCase();
+    const lang = langHeader.startsWith('en') ? 'en' : 'es';
+
+    emailService.sendVerificationEmail({
+      to: user.email,
+      username: user.username,
+      token: verificationToken,
+      req,
+      lang,
+    }).catch((err) => logger.warn('resend sendVerificationEmail rejected:', err?.message));
+
+    res.json({
+      success: true,
+      message: 'If an account exists with that email, a verification link has been sent.'
+    });
+  } catch (error) {
+    logger.error('resendVerification error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+};
+
 module.exports = {
   register,
   login,
@@ -543,5 +733,7 @@ module.exports = {
   refreshToken,
   validateEmail,
   logout,
-  verifyToken
+  verifyToken,
+  verifyEmail,
+  resendVerification
 };

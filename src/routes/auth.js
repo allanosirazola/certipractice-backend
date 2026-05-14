@@ -9,7 +9,9 @@ const {
   refreshToken,
   validateEmail,
   logout,
-  verifyToken
+  verifyToken,
+  verifyEmail,
+  resendVerification
 } = require('../controllers/authController');
 const { auth, optionalAuth, adminAuth } = require('../middleware/auth');
 
@@ -18,6 +20,11 @@ const router = express.Router();
 // Public routes
 router.post('/register', optionalAuth, register); // optionalAuth to allow admin role assignment
 router.post('/login', login);
+
+// Email verification — both endpoints are intentionally public so that a
+// user with an expired session can still finish or restart the flow.
+router.post('/verify-email', verifyEmail);
+router.post('/resend-verification', optionalAuth, resendVerification);
 router.post('/logout', logout);
 
 // Token verification

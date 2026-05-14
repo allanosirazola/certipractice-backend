@@ -24,6 +24,12 @@ model User {
   role          UserRole  @default(student)
   isActive      Boolean   @default(true) @map("is_active")
   isValidated   Boolean   @default(false) @map("is_validated")
+  // Email-verification state. emailVerified=true means the user clicked the
+  // link sent to their inbox; defaults to true for existing rows via the
+  // backfill in the migration. New registrations land at false.
+  emailVerified            Boolean   @default(true)  @map("email_verified")
+  emailVerificationToken   String?   @map("email_verification_token") @db.VarChar(128)
+  emailVerificationExpires DateTime? @map("email_verification_expires")
   lastLoginAt   DateTime? @map("last_login_at")
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
@@ -40,6 +46,7 @@ model User {
   @@index([email])
   @@index([username])
   @@index([role])
+  @@index([emailVerificationToken])
   @@map("users")
 }
 
