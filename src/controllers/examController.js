@@ -2,6 +2,7 @@ const ExamService = require('../services/examService');
 const Exam = require('../models/Exam');
 const logger = require('../utils/logger');
 const telemetry = require('../services/telemetryService');
+const reviewService = require('../services/reviewService');
 
 const createExam = async (req, res) => {
   try {
@@ -620,6 +621,14 @@ const submitAnswer = async (req, res) => {
       req,
       metadata: { examId: req.params.id },
     }).catch(() => {});
+
+    // Update spaced-repetition schedule (auth users only). Fire-and-forget;
+    // a DB failure here must never block the answer response.
+    if (req.user?.id && result?.isCorrect !== undefined && result?.isCorrect !== null) {
+      reviewService
+        .recordAnswer(req.user.id, questionId, !!result.isCorrect)
+        .catch((err) => logger.warn('reviewService.recordAnswer failed:', err?.message));
+    }
 
     res.json({
       success: true,

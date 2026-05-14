@@ -23,6 +23,7 @@ const adminAnalyticsRoutes = require('./routes/adminAnalytics');
 const engagementRoutes = require('./routes/engagement');
 const searchRoutes = require('./routes/search');
 const progressRoutes = require('./routes/progress');
+const reviewsRoutes = require('./routes/reviews');
 
 // Telemetry middleware
 const { trackPageView } = require('./middleware/telemetry');
@@ -149,6 +150,7 @@ app.use('/api/admin/analytics', adminAnalyticsRoutes);
 app.use('/api/engagement', engagementRoutes);
 app.use('/api/search', searchRoutes);
 app.use('/api/progress', progressRoutes);
+app.use('/api/reviews', reviewsRoutes);
 
 // API version prefix (optional, for future versioning)
 app.use('/api/v1/auth', authRoutes);
