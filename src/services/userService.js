@@ -1,6 +1,47 @@
 const User = require('../models/User');
+const jwt = require('jsonwebtoken');
+const config = require('../config/config');
 const db = require('../utils/database');
 const logger = require('../utils/logger');
+
+/**
+ * Lazy access to the Prisma-backed user repository.
+ *
+ * Why lazy: requiring the repository at the top of this file pulls in
+ * @prisma/client and tries to instantiate the engine. Test runners that
+ * jest-mock this service still auto-load it to inspect its exports,
+ * which would otherwise fail in environments without `prisma generate`
+ * (or without the binary engine, e.g. offline sandboxes).
+ */
+let _userRepository = null;
+function repo() {
+  if (!_userRepository) {
+    _userRepository = require('../repositories').userRepository;
+  }
+  return _userRepository;
+}
+
+/**
+ * Lightweight wrapper that mimics the legacy User-instance API the
+ * controllers expect (toJSON + generateToken), but is backed by the
+ * plain object returned by Prisma's userRepository.
+ */
+function wrapUser(row) {
+  if (!row) return row;
+  return Object.assign(Object.create({
+    toJSON() {
+      const { passwordHash, ...rest } = this;
+      return rest;
+    },
+    generateToken() {
+      const payload = { id: this.id, email: this.email, role: this.role };
+      return jwt.sign(payload, config.jwt.secret, {
+        expiresIn: config.jwt.expiresIn,
+        algorithm: config.jwt.algorithm,
+      });
+    },
+  }), row);
+}
 
 class UserService {
   async createUser(userData) {
@@ -11,37 +52,28 @@ class UserService {
         throw new Error(errors.join(', '));
       }
 
-      // Check if user already exists
-      const existingUserByEmail = await User.findByEmail(userData.email);
-      if (existingUserByEmail) {
+      // Check for duplicates against the repository (Prisma-backed)
+      const existingByEmail = await repo().findByEmail(userData.email);
+      if (existingByEmail) {
         throw new Error('User with this email already exists');
       }
-
-      const existingUserByUsername = await User.findByUsername(userData.username);
-      if (existingUserByUsername) {
+      const existingByUsername = await repo().findByUsername(userData.username);
+      if (existingByUsername) {
         throw new Error('User with this username already exists');
       }
 
-      // Create new user instance
-      const user = new User({
+      // Repository hashes the password and returns the persisted row
+      const created = await repo().create({
         username: userData.username,
-        email: userData.email.toLowerCase(),
+        email: userData.email,
         password: userData.password,
-        first_name: userData.firstName || '',
-        last_name: userData.lastName || '',
+        firstName: userData.firstName || null,
+        lastName: userData.lastName || null,
         role: userData.role || 'student',
-        is_active: userData.isActive !== undefined ? userData.isActive : true,
-        is_validated: userData.isValidated !== undefined ? userData.isValidated : false
       });
 
-      // Hash password
-      await user.hashPassword();
-
-      // Save to database
-      await user.save();
-
-      logger.info(`User created successfully: ${user.username} (${user.email})`);
-      return user;
+      logger.info(`User created successfully: ${created.username} (${created.email})`);
+      return wrapUser(created);
     } catch (error) {
       logger.error('Error creating user:', error);
       throw error;
@@ -50,11 +82,9 @@ class UserService {
 
   async getUserById(id) {
     try {
-      if (!id) {
-        return null;
-      }
-      
-      return await User.findById(id);
+      if (!id) return null;
+      const row = await repo().findById(id);
+      return row ? wrapUser(row) : null;
     } catch (error) {
       logger.error('Error getting user by ID:', error);
       throw error;
