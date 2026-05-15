@@ -329,6 +329,7 @@ class UserRepository {
       role: true,
       isActive: true,
       isValidated: true,
+      emailVerified: true,
       lastLoginAt: true,
       createdAt: true,
       updatedAt: true,
