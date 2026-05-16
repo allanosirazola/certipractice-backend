@@ -42,6 +42,7 @@ model User {
   bookmarks         Bookmark[]
   questionNotes     QuestionNote[]
   questionReviews   QuestionReview[]
+  dailyQuizCompletions DailyQuizCompletion[]
 
   @@index([email])
   @@index([username])
@@ -598,4 +599,34 @@ model DailyMetrics {
   @@index([date])
   @@index([scope, date])
   @@map("daily_metrics")
+}
+
+/// Daily-quiz completion record.
+///
+/// One row per (user, quiz_date). Created when a user submits their
+/// 5-question daily quiz. Anonymous users don't write here — their
+/// completion is tracked client-side via localStorage only.
+///
+/// Doubles as the streak source of truth for the daily-quiz cadence
+/// (separate from generic activity streaks).
+model DailyQuizCompletion {
+  id          BigInt   @id @default(autoincrement())
+  userId      Int      @map("user_id")
+  /// The quiz date in UTC, normalized to midnight (YYYY-MM-DD).
+  /// Unique per user so the same day can't be submitted twice.
+  quizDate    DateTime @map("quiz_date") @db.Date
+  /// 0..5 — number of correctly-answered questions in this run.
+  score       Int
+  /// Total questions in the quiz (defensive; should always be 5 today).
+  total       Int      @default(5)
+  /// Question IDs presented (JSON array). Lets us audit the selection
+  /// algorithm and prevent re-selecting same questions next day.
+  questionIds Json     @map("question_ids")
+  completedAt DateTime @default(now()) @map("completed_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, quizDate])
+  @@index([userId, quizDate])
+  @@map("daily_quiz_completions")
 }

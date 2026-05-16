@@ -24,6 +24,7 @@ const engagementRoutes = require('./routes/engagement');
 const searchRoutes = require('./routes/search');
 const progressRoutes = require('./routes/progress');
 const reviewsRoutes = require('./routes/reviews');
+const dailyQuizRoutes = require('./routes/dailyQuiz');
 
 // Telemetry middleware
 const { trackPageView } = require('./middleware/telemetry');
@@ -151,6 +152,7 @@ app.use('/api/engagement', engagementRoutes);
 app.use('/api/search', searchRoutes);
 app.use('/api/progress', progressRoutes);
 app.use('/api/reviews', reviewsRoutes);
+app.use('/api/daily-quiz', dailyQuizRoutes);
 
 // API version prefix (optional, for future versioning)
 app.use('/api/v1/auth', authRoutes);
