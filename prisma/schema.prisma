@@ -44,7 +44,6 @@ model User {
   questionReviews   QuestionReview[]
   dailyQuizCompletions DailyQuizCompletion[]
   studyPlans        StudyPlan[]
-  studyPlans        StudyPlan[]
 
   @@index([email])
   @@index([username])
@@ -663,40 +662,4 @@ model StudyPlan {
   @@index([userId, isActive])
   @@index([userId, certificationId])
   @@map("study_plans")
-}
-
-/// Study plan toward a specific exam date.
-///
-/// One active plan per (user, certification) at a time. The plan is the
-/// user's commitment ("I want to be ready by July 1st, 30 min/day"); the
-/// service computes daily targets, on-track status, and adjusts when the
-/// user falls behind. Past plans are kept for history.
-model StudyPlan {
-  id              Int      @id @default(autoincrement())
-  userId          Int      @map("user_id")
-  certificationId Int      @map("certification_id")
-  /// Target date for the real exam. Comparisons use UTC midnight.
-  examDate        DateTime @map("exam_date") @db.Date
-  /// Self-set effort budget (10..240). The service uses this to decide
-  /// how many questions to suggest per day rather than a hard cap.
-  dailyMinutes    Int      @default(20) @map("daily_minutes")
-  /// Plan is active (in-progress) vs archived (exam passed / abandoned).
-  status          StudyPlanStatus @default(active)
-  /// Optional user-set target score (e.g. 80 for "I want at least 80%").
-  targetScore     Int?     @map("target_score")
-  createdAt       DateTime @default(now()) @map("created_at")
-  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at")
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@unique([userId, certificationId, status], name: "one_active_plan_per_user_cert")
-  @@index([userId, status])
-  @@index([examDate])
-  @@map("study_plans")
-}
-
-enum StudyPlanStatus {
-  active
-  completed
-  archived
 }

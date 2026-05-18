@@ -3,6 +3,7 @@ const Exam = require('../models/Exam');
 const logger = require('../utils/logger');
 const telemetry = require('../services/telemetryService');
 const reviewService = require('../services/reviewService');
+const studyPlanService = require('../services/studyPlanService');
 
 const createExam = async (req, res) => {
   try {
@@ -628,6 +629,16 @@ const submitAnswer = async (req, res) => {
       reviewService
         .recordAnswer(req.user.id, questionId, !!result.isCorrect)
         .catch((err) => logger.warn('reviewService.recordAnswer failed:', err?.message));
+
+      // Bump the active study plan counter (if any). Same fire-and-forget
+      // pattern — the user's answer must persist regardless of whether
+      // they happen to have a plan for this cert.
+      const certId = result?.certificationId || req.body?.certificationId;
+      if (certId) {
+        studyPlanService
+          .recordAnswered(req.user.id, certId)
+          .catch((err) => logger.warn('studyPlanService.recordAnswered failed:', err?.message));
+      }
     }
 
     res.json({
