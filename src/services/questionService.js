@@ -24,11 +24,11 @@ class QuestionService {
       const result = await client.query(`
         SELECT 
           q.id,
-          q.external_id,
+
           q.question_text as text,
           q.explanation,
-          q.difficulty_level as difficulty,
-          q.expected_answers_count,
+          q.difficulty,
+
           q.points,
           q.is_active,
           q.created_at,
@@ -38,13 +38,13 @@ class QuestionService {
           c.code as certification_code,
           p.name as provider_name,
           qt.name as question_type,
-          qt.display_name as question_type_display,
+          qt.description as question_type_display,
           COALESCE(
             json_agg(
               json_build_object(
                 'label', qo.option_label,
                 'text', qo.option_text,
-                'explanation', qo.explanation
+                'order_index', qo.order_index
               ) ORDER BY qo.order_index
             ) FILTER (WHERE qo.id IS NOT NULL), 
             '[]'::json
@@ -60,9 +60,9 @@ class QuestionService {
         JOIN question_types qt ON q.question_type_id = qt.id
         LEFT JOIN question_options qo ON q.id = qo.question_id
         WHERE q.is_active = true AND q.review_status = 'approved'
-        GROUP BY q.id, q.external_id, q.question_text, q.explanation, q.difficulty_level,
-                 q.expected_answers_count, q.points, q.is_active, q.created_at, q.updated_at,
-                 t.name, c.name, c.code, p.name, qt.name, qt.display_name
+        GROUP BY q.id, q.question_text, q.explanation, q.difficulty,
+                 q.points, q.is_active, q.created_at, q.updated_at,
+                 t.name, c.name, c.code, p.name, qt.name, qt.description
       `);
       client.release();
       
@@ -93,7 +93,7 @@ class QuestionService {
       questionTypeDisplay: row.question_type_display,
       expectedAnswers: row.expected_answers_count || 1,
       points: parseFloat(row.points) || 1.0,
-      isMultipleChoice: row.expected_answers_count > 1,
+      isMultipleChoice: row.question_type === 'multiple_choice',
       isActive: row.is_active,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -129,7 +129,7 @@ class QuestionService {
 
       if (filters.difficulty) {
         params.push(filters.difficulty.toLowerCase());
-        whereConditions.push(`q.difficulty_level = $${params.length}::difficulty_level`);
+        whereConditions.push(`q.difficulty = $${params.length}::"Difficulty"`);
       }
 
       if (filters.questionType) {
@@ -163,11 +163,11 @@ class QuestionService {
       const mainQuery = `
         SELECT 
           q.id,
-          q.external_id,
+
           q.question_text as text,
           q.explanation,
-          q.difficulty_level as difficulty,
-          q.expected_answers_count,
+          q.difficulty,
+
           q.points,
           q.is_active,
           q.created_at,
@@ -177,13 +177,13 @@ class QuestionService {
           c.code as certification_code,
           p.name as provider_name,
           qt.name as question_type,
-          qt.display_name as question_type_display,
+          qt.description as question_type_display,
           COALESCE(
             json_agg(
               json_build_object(
                 'label', qo.option_label,
                 'text', qo.option_text,
-                'explanation', qo.explanation
+                'order_index', qo.order_index
               ) ORDER BY qo.order_index
             ) FILTER (WHERE qo.id IS NOT NULL), 
             '[]'::json
@@ -199,9 +199,9 @@ class QuestionService {
         JOIN question_types qt ON q.question_type_id = qt.id
         LEFT JOIN question_options qo ON q.id = qo.question_id
         WHERE ${whereClause}
-        GROUP BY q.id, q.external_id, q.question_text, q.explanation, q.difficulty_level,
-                 q.expected_answers_count, q.points, q.is_active, q.created_at, q.updated_at,
-                 t.name, c.name, c.code, p.name, qt.name, qt.display_name
+        GROUP BY q.id, q.question_text, q.explanation, q.difficulty,
+                 q.points, q.is_active, q.created_at, q.updated_at,
+                 t.name, c.name, c.code, p.name, qt.name, qt.description
         ORDER BY q.created_at DESC
         LIMIT $${limitParam} OFFSET $${offsetParam}
       `;
@@ -244,11 +244,11 @@ class QuestionService {
       let query = `
         SELECT 
           q.id,
-          q.external_id,
+
           q.question_text as text,
           q.explanation,
-          q.difficulty_level as difficulty,
-          q.expected_answers_count,
+          q.difficulty,
+
           q.points,
           q.is_active,
           q.created_at,
@@ -258,13 +258,13 @@ class QuestionService {
           c.code as certification_code,
           p.name as provider_name,
           qt.name as question_type,
-          qt.display_name as question_type_display,
+          qt.description as question_type_display,
           COALESCE(
             json_agg(
               json_build_object(
                 'label', qo.option_label,
                 'text', qo.option_text,
-                'explanation', qo.explanation
+                'order_index', qo.order_index
               ) ORDER BY qo.order_index
             ) FILTER (WHERE qo.id IS NOT NULL), 
             '[]'::json
@@ -298,9 +298,9 @@ class QuestionService {
 
       query += `
         WHERE q.id = $1
-        GROUP BY q.id, q.external_id, q.question_text, q.explanation, q.difficulty_level,
-                 q.expected_answers_count, q.points, q.is_active, q.created_at, q.updated_at,
-                 t.name, c.name, c.code, p.name, qt.name, qt.display_name`;
+        GROUP BY q.id, q.question_text, q.explanation, q.difficulty,
+                 q.points, q.is_active, q.created_at, q.updated_at,
+                 t.name, c.name, c.code, p.name, qt.name, qt.description`;
 
       if (includeStats) {
         query += `, qs.total_attempts, qs.correct_attempts, qs.success_rate, qs.average_time_seconds`;
@@ -333,7 +333,7 @@ class QuestionService {
         questionTypeDisplay: row.question_type_display,
         expectedAnswers: row.expected_answers_count || 1,
         points: parseFloat(row.points) || 1.0,
-        isMultipleChoice: row.expected_answers_count > 1,
+        isMultipleChoice: row.question_type === 'multiple_choice',
         isActive: row.is_active,
         createdAt: row.created_at,
         updatedAt: row.updated_at
@@ -413,11 +413,11 @@ async getRandomQuestions(count, filters = {}) {
       const query = `
         SELECT 
           q.id,
-          q.external_id,
+
           q.question_text as text,
           q.explanation,
-          q.difficulty_level as difficulty,
-          q.expected_answers_count,
+          q.difficulty,
+
           q.points,
           q.is_active,
           q.created_at,
@@ -427,13 +427,13 @@ async getRandomQuestions(count, filters = {}) {
           c.code as certification_code,
           p.name as provider_name,
           qt.name as question_type,
-          qt.display_name as question_type_display,
+          qt.description as question_type_display,
           COALESCE(
             json_agg(
               json_build_object(
                 'label', qo.option_label,
                 'text', qo.option_text,
-                'explanation', qo.explanation
+                'order_index', qo.order_index
               ) ORDER BY qo.order_index
             ) FILTER (WHERE qo.id IS NOT NULL), 
             '[]'::json
@@ -449,9 +449,9 @@ async getRandomQuestions(count, filters = {}) {
         JOIN question_types qt ON q.question_type_id = qt.id
         LEFT JOIN question_options qo ON q.id = qo.question_id
         WHERE ${whereClause}
-        GROUP BY q.id, q.external_id, q.question_text, q.explanation, q.difficulty_level,
-                 q.expected_answers_count, q.points, q.is_active, q.created_at, q.updated_at,
-                 t.name, c.name, c.code, p.name, qt.name, qt.display_name
+        GROUP BY q.id, q.question_text, q.explanation, q.difficulty,
+                 q.points, q.is_active, q.created_at, q.updated_at,
+                 t.name, c.name, c.code, p.name, qt.name, qt.description
         ORDER BY RANDOM()
         LIMIT $${countParam}
       `;
@@ -509,37 +509,41 @@ async getRandomQuestions(count, filters = {}) {
   async getProviders() {
     try {
       const client = await this.pool.connect();
-      
-      // Get all active providers with optional counts
+
+      // Get all active providers with optional counts.
+      // Note: the providers table has no website_url column in the
+      // current Prisma schema (only logo_url and a code identifier).
+      // The legacy v2 SQL referenced p.website_url which would crash
+      // here against the new schema.
       const result = await client.query(`
-        SELECT 
+        SELECT
           p.id,
-          p.name, 
-          p.description, 
-          p.website_url, 
+          p.name,
+          p.code,
+          p.description,
           p.logo_url,
           p.created_at,
           COALESCE(cert_counts.certification_count, 0) as certification_count,
           COALESCE(question_counts.question_count, 0) as question_count
         FROM providers p
         LEFT JOIN (
-          SELECT 
+          SELECT
             provider_id,
             COUNT(*) as certification_count
-          FROM certifications 
+          FROM certifications
           WHERE is_active = true
           GROUP BY provider_id
         ) cert_counts ON p.id = cert_counts.provider_id
         LEFT JOIN (
-          SELECT 
+          SELECT
             p2.id as provider_id,
             COUNT(DISTINCT q.id) as question_count
           FROM providers p2
           LEFT JOIN certifications c ON p2.id = c.provider_id
           LEFT JOIN topics t ON c.id = t.certification_id
           LEFT JOIN questions q ON t.id = q.topic_id
-          WHERE c.is_active = true 
-            AND t.is_active = true 
+          WHERE c.is_active = true
+            AND t.is_active = true
             AND q.is_active = true
             AND q.review_status = 'approved'
           GROUP BY p2.id
@@ -548,16 +552,16 @@ async getRandomQuestions(count, filters = {}) {
         ORDER BY p.name
       `);
       client.release();
-      
+
       return result.rows.map(row => ({
         id: row.id,
         name: row.name,
+        code: row.code,
         description: row.description,
-        website_url: row.website_url,
         logo_url: row.logo_url,
         certification_count: parseInt(row.certification_count) || 0,
         question_count: parseInt(row.question_count) || 0,
-        created_at: row.created_at
+        created_at: row.created_at,
       }));
     } catch (error) {
       logger.error('Error getting providers:', error);
@@ -574,7 +578,7 @@ async getRandomQuestions(count, filters = {}) {
           c.name, 
           c.code, 
           c.description, 
-          c.difficulty_level, 
+          c.difficulty, 
           c.duration_minutes, 
           c.passing_score, 
           c.total_questions,
@@ -597,7 +601,7 @@ async getRandomQuestions(count, filters = {}) {
       }
       
       query += ` 
-        GROUP BY c.id, c.name, c.code, c.description, c.difficulty_level, 
+        GROUP BY c.id, c.name, c.code, c.description, c.difficulty, 
                  c.duration_minutes, c.passing_score, c.total_questions, p.name
         ORDER BY c.name`;
       
@@ -661,10 +665,10 @@ async getRandomQuestions(count, filters = {}) {
           COUNT(CASE WHEN qt.name = 'multiple_choice' THEN 1 END) as single_choice_questions,
           COUNT(CASE WHEN qt.name = 'true_false' THEN 1 END) as true_false_questions,
           AVG(q.expected_answers_count) as avg_expected_answers,
-          COUNT(CASE WHEN q.difficulty_level = 'easy' THEN 1 END) as easy_questions,
-          COUNT(CASE WHEN q.difficulty_level = 'medium' THEN 1 END) as medium_questions,
-          COUNT(CASE WHEN q.difficulty_level = 'hard' THEN 1 END) as hard_questions,
-          COUNT(CASE WHEN q.difficulty_level = 'expert' THEN 1 END) as expert_questions,
+          COUNT(CASE WHEN q.difficulty = 'easy' THEN 1 END) as easy_questions,
+          COUNT(CASE WHEN q.difficulty = 'medium' THEN 1 END) as medium_questions,
+          COUNT(CASE WHEN q.difficulty = 'hard' THEN 1 END) as hard_questions,
+          COUNT(CASE WHEN q.difficulty = 'expert' THEN 1 END) as expert_questions,
           AVG(q.points) as avg_points
         FROM questions q
         JOIN question_types qt ON q.question_type_id = qt.id
@@ -737,13 +741,13 @@ async getRandomQuestions(count, filters = {}) {
         SELECT 
           q.id,
           q.question_text as text,
-          q.difficulty_level as difficulty,
-          q.expected_answers_count,
+          q.difficulty,
+
           COUNT(qo.id) as option_count
         FROM questions q
         LEFT JOIN question_options qo ON q.id = qo.question_id
         WHERE q.topic_id = $1 AND q.is_active = true AND q.review_status = 'approved'
-        GROUP BY q.id, q.question_text, q.difficulty_level, q.expected_answers_count
+        GROUP BY q.id, q.question_text, q.difficulty, q.expected_answers_count
         ORDER BY q.created_at
       `, [topicId]);
       client.release();
@@ -1160,7 +1164,7 @@ async getRandomQuestions(count, filters = {}) {
 
       if (filters.difficulty) {
         params.push(filters.difficulty.toLowerCase());
-        whereConditions.push(`q.difficulty_level = ${params.length}::difficulty_level`);
+        whereConditions.push(`q.difficulty = ${params.length}::"Difficulty"`);
       }
 
       const whereClause = whereConditions.join(' AND ');
@@ -1177,18 +1181,18 @@ async getRandomQuestions(count, filters = {}) {
       const query = `
         SELECT 
           q.id,
-          q.external_id,
+
           q.question_text as text,
           q.explanation,
-          q.difficulty_level as difficulty,
-          q.expected_answers_count,
+          q.difficulty,
+
           q.points,
           t.name as topic_name,
           c.name as certification_name,
           c.code as certification_code,
           p.name as provider_name,
           qt.name as question_type,
-          qt.display_name as question_type_display,
+          qt.description as question_type_display,
           ts_rank_cd(to_tsvector('english', q.question_text || ' ' || COALESCE(q.explanation, '')), 
                      plainto_tsquery('english', $1)) as relevance_score
         FROM questions q
@@ -1247,7 +1251,7 @@ async getRandomQuestions(count, filters = {}) {
         SELECT 
           q.id,
           q.question_text as text,
-          q.difficulty_level as difficulty,
+          q.difficulty,
           t.name as topic_name,
           c.name as certification_name,
           p.name as provider_name
@@ -1255,7 +1259,7 @@ async getRandomQuestions(count, filters = {}) {
         JOIN topics t ON q.topic_id = t.id
         JOIN certifications c ON t.certification_id = c.id
         JOIN providers p ON c.provider_id = p.id
-        WHERE q.difficulty_level = $1::difficulty_level 
+        WHERE q.difficulty = $1::"Difficulty" 
           AND q.is_active = true 
           AND q.review_status = 'approved'
         ORDER BY RANDOM()
@@ -1277,10 +1281,10 @@ async getRandomQuestions(count, filters = {}) {
       const result = await client.query(`
         SELECT 
           q.id,
-          q.external_id,
+
           q.question_text as text,
           q.explanation,
-          q.difficulty_level as difficulty,
+          q.difficulty,
           q.review_status,
           q.created_at,
           t.name as topic_name,
@@ -1293,8 +1297,8 @@ async getRandomQuestions(count, filters = {}) {
         JOIN providers p ON c.provider_id = p.id
         LEFT JOIN question_options qo ON q.id = qo.question_id
         WHERE q.review_status = $1::review_status
-        GROUP BY q.id, q.external_id, q.question_text, q.explanation, 
-                 q.difficulty_level, q.review_status, q.created_at,
+        GROUP BY q.id, q.question_text, q.explanation, 
+                 q.difficulty, q.review_status, q.created_at,
                  t.name, c.name, p.name
         ORDER BY q.created_at ASC
         LIMIT $2
