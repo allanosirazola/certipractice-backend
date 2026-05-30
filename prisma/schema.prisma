@@ -85,6 +85,10 @@ model Certification {
   code        String   @unique @db.VarChar(50)
   description String?  @db.Text
   difficulty  String   @default("medium") @db.VarChar(20)
+  // Per-certification exam configuration (populated by post_migration_fix.py).
+  numQuestions    Int?  @map("num_questions")    // questions per practice exam
+  durationMinutes Int?  @map("duration_minutes") // time limit in minutes
+  passingScore    Int?  @map("passing_score")    // pass threshold (%)
   isActive    Boolean  @default(true) @map("is_active")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
