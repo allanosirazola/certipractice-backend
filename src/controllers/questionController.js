@@ -308,8 +308,6 @@ const getCertifications = async (req, res) => {
   try {
     const { provider } = req.query;
     const certifications = await QuestionService.getCertifications(provider);
-    console.log(certifications)
-    console.log(provider)
     res.json({
       success: true,
       data: certifications,
