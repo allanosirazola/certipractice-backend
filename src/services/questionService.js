@@ -570,19 +570,29 @@ async getRandomQuestions(count, filters = {}) {
   }
 
   async getCertifications(provider) {
-    try {
-      const client = await this.pool.connect();
-      // List active certifications for the (optional) provider. The
-      // certifications table only has id/name/code/description/difficulty
-      // in the current schema — selecting duration_minutes/passing_score/
-      // total_questions (legacy columns) made this query throw and the
-      // catch swallowed it, returning [] for every provider.
-      //
-      // Topics/questions are LEFT JOINed so a certification still shows up
-      // when it is is_active = true even if it has no approved questions
-      // yet. The review_status = 'approved' gate stays on the question
-      // count (and is still enforced when fetching the actual exam
-      // questions), so the count reflects only usable questions.
+    // Builds the certifications query. `withConfig` selects the per-cert exam
+    // configuration columns (num_questions / duration_minutes / passing_score).
+    // Those columns are added/populated by the post-migration script; if they
+    // are not present yet we fall back to a config-less query so the page does
+    // not break.
+    //
+    // Topics/questions are LEFT JOINed so a certification still shows up when
+    // it is is_active = true even if it has no approved questions yet. The
+    // review_status = 'approved' gate stays on the question count (and is still
+    // enforced when fetching the actual exam questions), so available_questions
+    // reflects only usable questions.
+    const buildQuery = (withConfig) => {
+      const configCols = withConfig
+        ? `COALESCE(c.num_questions, 60)    as total_questions,
+           COALESCE(c.duration_minutes, 90) as duration_minutes,
+           COALESCE(c.passing_score, 70)    as passing_score,`
+        // Fallback: no config columns yet — expose the available count as
+        // total_questions so the UI keeps working (pre-migration behaviour).
+        : `COUNT(DISTINCT q.id) as total_questions,`;
+      const configGroupBy = withConfig
+        ? ', c.num_questions, c.duration_minutes, c.passing_score'
+        : '';
+
       let query = `
         SELECT
           c.id,
@@ -591,8 +601,8 @@ async getRandomQuestions(count, filters = {}) {
           c.description,
           c.difficulty,
           p.name as provider_name,
-          COUNT(DISTINCT q.id) as available_questions,
-          COUNT(DISTINCT q.id) as total_questions
+          ${configCols}
+          COUNT(DISTINCT q.id) as available_questions
         FROM certifications c
         JOIN providers p ON c.provider_id = p.id
         LEFT JOIN topics t
@@ -604,7 +614,7 @@ async getRandomQuestions(count, filters = {}) {
           AND q.review_status = 'approved'
         WHERE c.is_active = true
       `;
-      let params = [];
+      const params = [];
 
       if (provider) {
         query += ' AND LOWER(p.name) = $1';
@@ -612,16 +622,32 @@ async getRandomQuestions(count, filters = {}) {
       }
 
       query += `
-        GROUP BY c.id, c.name, c.code, c.description, c.difficulty, p.name
+        GROUP BY c.id, c.name, c.code, c.description, c.difficulty, p.name${configGroupBy}
         ORDER BY c.name`;
 
-      const result = await client.query(query, params);
-      client.release();
+      return { query, params };
+    };
 
-      return result.rows;
+    const client = await this.pool.connect();
+    try {
+      try {
+        const { query, params } = buildQuery(true);
+        const result = await client.query(query, params);
+        return result.rows;
+      } catch (err) {
+        logger.warn(
+          'getCertifications: exam-config columns missing, falling back:',
+          err.message
+        );
+        const { query, params } = buildQuery(false);
+        const result = await client.query(query, params);
+        return result.rows;
+      }
     } catch (error) {
       logger.error('Error getting certifications:', error);
       return [];
+    } finally {
+      client.release();
     }
   }
 
