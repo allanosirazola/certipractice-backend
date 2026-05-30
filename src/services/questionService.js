@@ -572,42 +572,52 @@ async getRandomQuestions(count, filters = {}) {
   async getCertifications(provider) {
     try {
       const client = await this.pool.connect();
+      // List active certifications for the (optional) provider. The
+      // certifications table only has id/name/code/description/difficulty
+      // in the current schema — selecting duration_minutes/passing_score/
+      // total_questions (legacy columns) made this query throw and the
+      // catch swallowed it, returning [] for every provider.
+      //
+      // Topics/questions are LEFT JOINed so a certification still shows up
+      // when it is is_active = true even if it has no approved questions
+      // yet. The review_status = 'approved' gate stays on the question
+      // count (and is still enforced when fetching the actual exam
+      // questions), so the count reflects only usable questions.
       let query = `
-        SELECT DISTINCT 
+        SELECT
           c.id,
-          c.name, 
-          c.code, 
-          c.description, 
-          c.difficulty, 
-          c.duration_minutes, 
-          c.passing_score, 
-          c.total_questions,
+          c.name,
+          c.code,
+          c.description,
+          c.difficulty,
           p.name as provider_name,
-          COUNT(DISTINCT q.id) as available_questions
+          COUNT(DISTINCT q.id) as available_questions,
+          COUNT(DISTINCT q.id) as total_questions
         FROM certifications c
         JOIN providers p ON c.provider_id = p.id
-        JOIN topics t ON c.id = t.certification_id
-        JOIN questions q ON t.id = q.topic_id
-        WHERE c.is_active = true 
-          AND t.is_active = true 
+        LEFT JOIN topics t
+          ON c.id = t.certification_id
+          AND t.is_active = true
+        LEFT JOIN questions q
+          ON t.id = q.topic_id
           AND q.is_active = true
           AND q.review_status = 'approved'
+        WHERE c.is_active = true
       `;
       let params = [];
-      
+
       if (provider) {
         query += ' AND LOWER(p.name) = $1';
         params.push(provider.toLowerCase());
       }
-      
-      query += ` 
-        GROUP BY c.id, c.name, c.code, c.description, c.difficulty, 
-                 c.duration_minutes, c.passing_score, c.total_questions, p.name
+
+      query += `
+        GROUP BY c.id, c.name, c.code, c.description, c.difficulty, p.name
         ORDER BY c.name`;
-      
+
       const result = await client.query(query, params);
       client.release();
-      
+
       return result.rows;
     } catch (error) {
       logger.error('Error getting certifications:', error);
