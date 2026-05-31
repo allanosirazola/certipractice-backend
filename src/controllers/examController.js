@@ -7,377 +7,219 @@ const studyPlanService = require('../services/studyPlanService');
 
 const createExam = async (req, res) => {
   try {
-    // ACTUALIZADO: Datos mínimos requeridos para crear un examen
     const {
       provider,
       certification,
-      mode = 'practice',
-      questionCount,
-      timeLimit,
+      questionCount = 10,
       difficulty,
-      category,
-      settings = {}
+      mode = 'practice',
+      timeLimit,
+      passingScore
     } = req.body;
 
-    // Crear objeto de datos mínimos para validación
-    const minimalExamData = {
-      provider,
-      certification,
-      mode,
-      questionCount,
-      timeLimit,
-      difficulty
-    };
+    // Build the question set with the schema-aware service. It returns Question
+    // models with their options already joined from question_options, and only
+    // active + approved questions. We draw randomly from the whole certification
+    // (the cert-level "difficulty" is not a per-question filter).
+    const questionObjs = await QuestionService.getRandomQuestions(
+      parseInt(questionCount) || 10,
+      { certification }
+    );
 
-    // Validar solo los datos esenciales
-    const errors = Exam.validate(minimalExamData);
-    if (errors.length > 0) {
+    if (!questionObjs || questionObjs.length === 0) {
       return res.status(400).json({
-        success: false,
-        error: errors.join(', ')
-      });
-    }
-
-    const userId = req.user ? req.user.id : null;
-    const sessionId = req.sessionId || null;
-
-    // Validar que tengamos userId O sessionId
-    if (!userId && !sessionId) {
-      logger.error('No userId or sessionId provided for exam creation');
-      return res.status(400).json({
-        success: false,
-        error: 'Session identification required'
-      });
-    }
-
-    logger.info('Creating exam request:', {
-      userId,
-      sessionId,
-      provider,
-      certification,
-      mode,
-      questionCount: questionCount || 'default'
-    });
-
-    // ACTUALIZADO: Pasar solo datos necesarios al servicio
-    const examConfig = {
-      provider,
-      certification,
-      mode,
-      questionCount,
-      timeLimit,
-      difficulty,
-      category,
-      settings: {
-        randomizeQuestions: settings.randomizeQuestions !== false,
-        randomizeAnswers: settings.randomizeAnswers === true,
-        showExplanations: mode === 'practice',
-        allowPause: mode === 'practice',
-        allowReview: mode === 'practice',
-        ...settings
-      }
-    };
-
-    const exam = await ExamService.createExam(examConfig, userId, sessionId);
-
-    // Establecer sessionId en la respuesta para usuarios anónimos
-    if (!userId && sessionId) {
-      res.setHeader('X-Session-Id', sessionId);
-    }
-
-    // Telemetry: track exam creation (fire-and-forget)
-    telemetry.trackExamEvent({
-      examId: exam.id,
-      eventType: 'exam_created',
-      req,
-      metadata: {
-        provider: exam.provider,
-        certification: exam.certification,
-        mode: exam.mode,
-        questionCount: exam.questionCount || exam.questions?.length,
-      },
-    }).catch(() => {});
-
-    res.status(201).json({
-      success: true,
-      data: exam.toJSON(),
-      sessionId: !userId ? sessionId : undefined
-    });
-  } catch (error) {
-    logger.error('Create exam error:', error);
-    
-    // Manejar errores específicos de PostgreSQL
-    if (error.message.includes('No certification found')) {
-      return res.status(404).json({
-        success: false,
-        error: 'Certification not found for the specified provider'
-      });
-    }
-    
-    if (error.message.includes('No questions found')) {
-      return res.status(404).json({
         success: false,
         error: 'No questions available for the specified criteria'
       });
     }
 
-    res.status(400).json({
+    // Sanitized = no correct answers leaked to the client.
+    const formattedQuestions = questionObjs.map(q => q.getSanitized());
+
+    // Certification info using the CURRENT schema columns (num_questions /
+    // duration_minutes / passing_score were added by the post-migration script;
+    // COALESCE keeps this working even before they are populated).
+    const certQuery = `
+      SELECT
+        c.id, c.name, c.code, c.description, c.difficulty,
+        COALESCE(c.num_questions, 60)    as num_questions,
+        COALESCE(c.duration_minutes, 90) as duration_minutes,
+        COALESCE(c.passing_score, 70)    as passing_score,
+        p.name as provider_name
+      FROM certifications c
+      JOIN providers p ON c.provider_id = p.id
+      WHERE c.id = $1
+    `;
+    const certResult = await pool.query(certQuery, [certification]);
+
+    if (certResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Certification not found'
+      });
+    }
+    const certificationData = certResult.rows[0];
+
+    const finalTimeLimit = timeLimit || certificationData.duration_minutes || 120;
+    const finalPassingScore = passingScore || certificationData.passing_score || 70;
+
+    // Persist the exam only for authenticated users.
+    let examId = null;
+    if (req.user && req.user.id) {
+      const examResult = await pool.query(
+        `INSERT INTO exams (
+           user_id, certification_id, title, mode, status, total_questions,
+           passing_score, time_limit_minutes, created_at, updated_at
+         ) VALUES ($1, $2, $3, $4, 'created', $5, $6, $7, NOW(), NOW())
+         RETURNING id`,
+        [
+          req.user.id,
+          certification,
+          `${certificationData.provider_name} - ${certificationData.name}`,
+          mode,
+          formattedQuestions.length,
+          finalPassingScore,
+          finalTimeLimit
+        ]
+      );
+      examId = examResult.rows[0].id;
+    }
+
+    res.json({
+      success: true,
+      data: {
+        examId,
+        questions: formattedQuestions,
+        certification: certificationData,
+        totalQuestions: formattedQuestions.length,
+        timeLimit: finalTimeLimit,
+        passingScore: finalPassingScore
+      }
+    });
+  } catch (error) {
+    logger.error('Error creating exam:', error);
+    res.status(500).json({
       success: false,
-      error: error.message
+      error: 'Failed to create exam'
     });
   }
 };
 
 const createFailedQuestionsExam = async (req, res) => {
   try {
-    const userId = req.user.id;
-    const {
-      provider,
-      certification, 
-      category,
-      difficulty,
-      questionCount = 20,
-      settings = {}
-    } = req.body;
+    const { certification, questionCount = 20 } = req.body;
 
-    if (!provider || !certification) {
-      return res.status(400).json({
+    if (!req.user || !req.user.id) {
+      return res.status(401).json({
         success: false,
-        error: 'Provider and certification are required'
+        error: 'Authentication required for failed questions exam'
       });
     }
 
-    logger.info('Creating failed questions exam:', {
-      userId, provider, certification, questionCount, category, difficulty
-    });
+    // Failed questions for this user + certification, with their options
+    // (current schema: options live in question_options, difficulty is q.difficulty).
+    const failedQuery = `
+      SELECT
+        q.id,
+        q.question_text as text,
+        q.explanation,
+        q.difficulty,
+        q.points,
+        q.topic_id,
+        COALESCE(
+          json_agg(
+            json_build_object(
+              'label', qo.option_label,
+              'text', qo.option_text,
+              'order_index', qo.order_index
+            ) ORDER BY qo.order_index
+          ) FILTER (WHERE qo.id IS NOT NULL),
+          '[]'::json
+        ) as options
+      FROM questions q
+      JOIN topics t ON q.topic_id = t.id
+      JOIN certifications c ON t.certification_id = c.id
+      JOIN exam_answers ea ON q.id = ea.question_id
+      JOIN exams e ON ea.exam_id = e.id
+      LEFT JOIN question_options qo ON q.id = qo.question_id
+      WHERE e.user_id = $1 AND ea.is_correct = false
+        AND c.id = $2 AND q.is_active = true AND q.review_status = 'approved'
+      GROUP BY q.id, q.question_text, q.explanation, q.difficulty, q.points, q.topic_id
+      ORDER BY RANDOM()
+      LIMIT $3
+    `;
+    const failedResult = await pool.query(failedQuery, [req.user.id, certification, questionCount]);
 
-    const client = await ExamService.pool.connect();
-    
-    try {
-      // Construir condiciones WHERE y parámetros correctamente
-      let whereConditions = [
-        'e.user_id = $1',
-        'ua.is_correct = false',
-        'e.status = $2',
-        'q.is_active = true',
-        'p.id = $3',
-        'c.id = $4'
-      ];
-      
-      // Array de parámetros - EXACTAMENTE 4 parámetros
-      let queryParams = [
-        userId, 
-        'completed', 
-        provider, 
-        parseInt(certification)
-      ];
+    const formattedQuestions = failedResult.rows.map(q => ({
+      id: q.id,
+      text: q.text,
+      question: q.text,
+      options: q.options,
+      explanation: q.explanation,
+      difficulty: q.difficulty,
+      points: q.points,
+      topicId: q.topic_id
+    }));
 
-      // Calcular límite de preguntas
-      const limitValue = Math.min(parseInt(questionCount), 50);
-
-      // Query principal - usando interpolación directa para LIMIT
-      const failedQuestionsQuery = `
-        SELECT
-          q.id,
-          q.question_text,
-          q.explanation,
-          q.difficulty_level,
-          q.expected_answers_count,
-          qt.name as question_type,
-          t.name as topic_name,
-          COUNT(ua.id) as failed_count
-        FROM user_answers ua
-        JOIN exam_questions eq ON ua.exam_question_id = eq.id
-        JOIN questions q ON eq.question_id = q.id
-        JOIN question_types qt ON q.question_type_id = qt.id
-        JOIN topics t ON q.topic_id = t.id
-        JOIN certifications c ON t.certification_id = c.id
-        JOIN providers p ON c.provider_id = p.id
-        JOIN exams e ON eq.exam_id = e.id
-        WHERE ${whereConditions.join(' AND ')}
-        GROUP BY q.id, q.question_text, q.explanation, q.difficulty_level, 
-                 q.expected_answers_count, qt.name, t.name
-        ORDER BY failed_count DESC, RANDOM()
-        LIMIT ${limitValue}
-      `;
-
-      const failedQuestionsResult = await client.query(failedQuestionsQuery, queryParams);
-      const failedQuestions = failedQuestionsResult.rows;
-
-      if (failedQuestions.length < 5) {
-        return res.status(400).json({
-          success: false,
-          error: `Not enough failed questions found. Minimum 5 required, found ${failedQuestions.length}`,
-          data: {
-            availableQuestions: failedQuestions.length,
-            minimumRequired: 5
-          }
-        });
-      }
-
-      // Obtener datos de certificación
-      const certQuery = `
-        SELECT 
-          c.id, c.name, c.code, c.description, c.duration_minutes, 
-          c.passing_score, c.total_questions,
-          p.name as provider_name, p.description as provider_description
-        FROM certifications c
-        JOIN providers p ON c.provider_id = p.id
-        WHERE c.id = $1 AND c.is_active = true
-      `;
-      const certResult = await client.query(certQuery, [parseInt(certification)]);
-      
-      if (certResult.rows.length === 0) {
-        return res.status(404).json({
-          success: false,
-          error: 'Certification not found'
-        });
-      }
-
-      const certificationData = certResult.rows[0];
-
-      // Construir array de preguntas con opciones
-      const questions = [];
-      for (const questionRow of failedQuestions) {
-        const optionsQuery = `
-          SELECT id, option_label, option_text, is_correct, order_index
-          FROM question_options
-          WHERE question_id = $1
-          ORDER BY order_index
-        `;
-
-        const optionsResult = await client.query(optionsQuery, [questionRow.id]);
-
-        questions.push({
-          id: questionRow.id,
-          text: questionRow.question_text,
-          explanation: questionRow.explanation,
-          difficulty: questionRow.difficulty_level,
-          category: questionRow.topic_name,
-          provider: certificationData.provider_name,
-          questionType: questionRow.question_type,
-          isMultipleChoice: questionRow.question_type === 'multiple_answer',
-          expectedAnswers: questionRow.expected_answers_count,
-          options: optionsResult.rows.map(opt => ({
-            label: opt.option_label,
-            text: opt.option_text
-          })),
-          failedCount: questionRow.failed_count
-        });
-      }
-
-      const timeLimit = Math.ceil(questions.length * 1.5);
-      const examTitle = `${certificationData.provider_name} ${certificationData.name} - Preguntas Fallidas`;
-
-      // Crear examen en transacción
-      await client.query('BEGIN');
-
-      const insertExamQuery = `
-        INSERT INTO exams (
-          user_id, certification_id, exam_mode, status,
-          total_questions, time_limit_minutes, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        RETURNING *
-      `;
-
-      const examValues = [
-        userId,
-        certificationData.id,
-        'failed_questions',
-        'pending',
-        questions.length,
-        timeLimit
-      ];
-
-      const examResult = await client.query(insertExamQuery, examValues);
-      const examRow = examResult.rows[0];
-      const examId = examRow.id;
-
-      // Insertar preguntas del examen
-      const insertQuestionsQuery = `
-        INSERT INTO exam_questions (exam_id, question_id, question_order)
-        VALUES ($1, $2, $3)
-      `;
-
-      const orderedQuestions = settings.randomizeQuestions !== false ? 
-        questions.sort(() => 0.5 - Math.random()) : questions;
-
-      for (let i = 0; i < orderedQuestions.length; i++) {
-        await client.query(insertQuestionsQuery, [
-          examId,
-          orderedQuestions[i].id,
-          i + 1
-        ]);
-      }
-
-      await client.query('COMMIT');
-
-      // Crear objeto Exam
-      const exam = new Exam({
-        id: examId,
-        userId: userId,
-        title: examTitle,
-        provider: certificationData.provider_name,
-        certification: certificationData.code,
-        questions: orderedQuestions,
-        timeLimit: timeLimit,
-        passingScore: certificationData.passing_score || 70,
-        status: 'not_started',
-        createdAt: examRow.created_at,
-        updatedAt: examRow.updated_at,
-        examMode: 'failed_questions',
-        settings: {
-          showExplanations: true,
-          randomizeQuestions: settings.randomizeQuestions !== false,
-          randomizeAnswers: settings.randomizeAnswers === true,
-          allowPause: true,
-          allowReview: true,
-          isFailedQuestionsExam: true,
-          ...settings
-        }
-      });
-
-      logger.info('Failed questions exam created successfully:', {
-        id: examId,
-        title: examTitle,
-        userId: userId,
-        questionCount: exam.questions.length,
-        timeLimit: timeLimit
-      });
-
-      res.status(201).json({
-        success: true,
-        data: exam.toJSON(),
-        message: `Failed questions exam created with ${questions.length} questions`
-      });
-
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
-    }
-
-  } catch (error) {
-    logger.error('Create failed questions exam error:', error);
-    
-    if (error.message.includes('Certification not found')) {
+    if (formattedQuestions.length === 0) {
       return res.status(404).json({
         success: false,
-        error: 'Certification not found'
-      });
-    }
-    
-    if (error.message.includes('Not enough failed questions')) {
-      return res.status(400).json({
-        success: false,
-        error: error.message
+        error: 'No failed questions found for this certification'
       });
     }
 
+    // Certification info (current schema columns).
+    const certResult = await pool.query(`
+      SELECT
+        c.id, c.name, c.code, c.description, c.difficulty,
+        COALESCE(c.num_questions, 60)    as num_questions,
+        COALESCE(c.duration_minutes, 90) as duration_minutes,
+        COALESCE(c.passing_score, 70)    as passing_score,
+        p.name as provider_name
+      FROM certifications c
+      JOIN providers p ON c.provider_id = p.id
+      WHERE c.id = $1
+    `, [certification]);
+    const certificationData = certResult.rows[0] || null;
+
+    const finalPassingScore = certificationData ? certificationData.passing_score : 70;
+    const finalTimeLimit = Math.max(Math.ceil(formattedQuestions.length * 1.5), 10);
+
+    const examResult = await pool.query(
+      `INSERT INTO exams (
+         user_id, certification_id, title, mode, status, total_questions,
+         passing_score, time_limit_minutes, created_at, updated_at
+       ) VALUES ($1, $2, $3, 'practice', 'created', $4, $5, $6, NOW(), NOW())
+       RETURNING id`,
+      [
+        req.user.id,
+        certification,
+        certificationData
+          ? `${certificationData.provider_name} - ${certificationData.name}`
+          : 'Failed questions',
+        formattedQuestions.length,
+        finalPassingScore,
+        finalTimeLimit
+      ]
+    );
+    const examId = examResult.rows[0].id;
+
+    res.json({
+      success: true,
+      data: {
+        examId,
+        questions: formattedQuestions,
+        certification: certificationData,
+        totalQuestions: formattedQuestions.length,
+        timeLimit: finalTimeLimit,
+        passingScore: finalPassingScore
+      }
+    });
+  } catch (error) {
+    logger.error('Error creating failed questions exam:', error);
     res.status(500).json({
       success: false,
-      error: 'Server error while creating failed questions exam'
+      error: 'Failed to create failed questions exam'
     });
   }
 };
