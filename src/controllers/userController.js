@@ -123,7 +123,7 @@ const getFailedQuestions = async (req, res) => {
     }
 
     if (difficulty) {
-      whereConditions.push(`q.difficulty_level = $${paramIndex}`);
+      whereConditions.push(`q.difficulty = $${paramIndex}`);
       queryParams.push(difficulty);
       paramIndex++;
     }
@@ -132,7 +132,7 @@ const getFailedQuestions = async (req, res) => {
       SELECT DISTINCT
         q.id,
         q.question_text as text,
-        q.difficulty_level as difficulty,
+        q.difficulty as difficulty,
         q.explanation,
         t.name as category,
         c.name as certification_name,
@@ -140,16 +140,15 @@ const getFailedQuestions = async (req, res) => {
         COUNT(ua.id) as failed_count,
         MAX(ua.answered_at) as last_failed_at,
         MIN(ua.answered_at) as first_failed_at
-      FROM user_answers ua
-      JOIN exam_questions eq ON ua.exam_question_id = eq.id
-      JOIN questions q ON eq.question_id = q.id
+      FROM exam_answers ua
+      JOIN questions q ON ua.question_id = q.id
       JOIN topics t ON q.topic_id = t.id
       JOIN certifications c ON t.certification_id = c.id
       JOIN providers p ON c.provider_id = p.id
-      JOIN exams e ON eq.exam_id = e.id
+      JOIN exams e ON ua.exam_id = e.id
       WHERE ${whereConditions.join(' AND ')}
         AND q.is_active = true
-      GROUP BY q.id, q.question_text, q.difficulty_level, q.explanation, 
+      GROUP BY q.id, q.question_text, q.difficulty, q.explanation, 
                t.name, c.name, p.name
       ORDER BY failed_count DESC, last_failed_at DESC
       LIMIT $${paramIndex}
@@ -176,8 +175,6 @@ const getFailedQuestionsStats = async (req, res) => {
   try {
     const userId = req.user.id;
     const { provider, certification } = req.query;
-    console.log(provider)
-    console.log(certification)
     let whereConditions = [
       'e.user_id = $1',
       'ua.is_correct = false',
@@ -202,13 +199,12 @@ const getFailedQuestionsStats = async (req, res) => {
 
     const totalQuery = `
       SELECT COUNT(DISTINCT q.id) as total_failed_questions
-      FROM user_answers ua
-      JOIN exam_questions eq ON ua.exam_question_id = eq.id
-      JOIN questions q ON eq.question_id = q.id
+      FROM exam_answers ua
+      JOIN questions q ON ua.question_id = q.id
       JOIN topics t ON q.topic_id = t.id
       JOIN certifications c ON t.certification_id = c.id
       JOIN providers p ON c.provider_id = p.id
-      JOIN exams e ON eq.exam_id = e.id
+      JOIN exams e ON ua.exam_id = e.id
       WHERE ${whereClause} AND q.is_active = true
     `;
 
@@ -217,13 +213,12 @@ const getFailedQuestionsStats = async (req, res) => {
         t.name as category,
         COUNT(DISTINCT q.id) as failed_questions,
         COUNT(ua.id) as total_failures
-      FROM user_answers ua
-      JOIN exam_questions eq ON ua.exam_question_id = eq.id
-      JOIN questions q ON eq.question_id = q.id
+      FROM exam_answers ua
+      JOIN questions q ON ua.question_id = q.id
       JOIN topics t ON q.topic_id = t.id
       JOIN certifications c ON t.certification_id = c.id
       JOIN providers p ON c.provider_id = p.id
-      JOIN exams e ON eq.exam_id = e.id
+      JOIN exams e ON ua.exam_id = e.id
       WHERE ${whereClause} AND q.is_active = true
       GROUP BY t.name
       ORDER BY failed_questions DESC
@@ -231,20 +226,19 @@ const getFailedQuestionsStats = async (req, res) => {
 
     const difficultyQuery = `
       SELECT 
-        q.difficulty_level as difficulty,
+        q.difficulty as difficulty,
         COUNT(DISTINCT q.id) as failed_questions,
         COUNT(ua.id) as total_failures
-      FROM user_answers ua
-      JOIN exam_questions eq ON ua.exam_question_id = eq.id
-      JOIN questions q ON eq.question_id = q.id
+      FROM exam_answers ua
+      JOIN questions q ON ua.question_id = q.id
       JOIN topics t ON q.topic_id = t.id
       JOIN certifications c ON t.certification_id = c.id
       JOIN providers p ON c.provider_id = p.id
-      JOIN exams e ON eq.exam_id = e.id
+      JOIN exams e ON ua.exam_id = e.id
       WHERE ${whereClause} AND q.is_active = true
-      GROUP BY q.difficulty_level
+      GROUP BY q.difficulty
       ORDER BY 
-        CASE q.difficulty_level 
+        CASE q.difficulty 
           WHEN 'easy' THEN 1 
           WHEN 'medium' THEN 2 
           WHEN 'hard' THEN 3 
@@ -256,18 +250,17 @@ const getFailedQuestionsStats = async (req, res) => {
       SELECT 
         q.id,
         LEFT(q.question_text, 100) || CASE WHEN LENGTH(q.question_text) > 100 THEN '...' ELSE '' END as text,
-        q.difficulty_level as difficulty,
+        q.difficulty as difficulty,
         t.name as category,
         COUNT(ua.id) as failed_count
-      FROM user_answers ua
-      JOIN exam_questions eq ON ua.exam_question_id = eq.id
-      JOIN questions q ON eq.question_id = q.id
+      FROM exam_answers ua
+      JOIN questions q ON ua.question_id = q.id
       JOIN topics t ON q.topic_id = t.id
       JOIN certifications c ON t.certification_id = c.id
       JOIN providers p ON c.provider_id = p.id
-      JOIN exams e ON eq.exam_id = e.id
+      JOIN exams e ON ua.exam_id = e.id
       WHERE ${whereClause} AND q.is_active = true
-      GROUP BY q.id, q.question_text, q.difficulty_level, t.name
+      GROUP BY q.id, q.question_text, q.difficulty, t.name
       ORDER BY failed_count DESC
       LIMIT 10
     `;
@@ -340,13 +333,12 @@ const getFailedQuestionsProgress = async (req, res) => {
         COUNT(DISTINCT CASE WHEN ua.is_correct = false THEN q.id END) as failed_questions,
         COUNT(DISTINCT CASE WHEN ua.is_correct = true THEN q.id END) as correct_questions,
         COUNT(DISTINCT q.id) as total_questions
-      FROM user_answers ua
-      JOIN exam_questions eq ON ua.exam_question_id = eq.id
-      JOIN questions q ON eq.question_id = q.id
+      FROM exam_answers ua
+      JOIN questions q ON ua.question_id = q.id
       JOIN topics t ON q.topic_id = t.id
       JOIN certifications c ON t.certification_id = c.id
       JOIN providers p ON c.provider_id = p.id
-      JOIN exams e ON eq.exam_id = e.id
+      JOIN exams e ON ua.exam_id = e.id
       WHERE ${whereClause}
         AND ua.answered_at >= NOW() - INTERVAL '${intervalDays} days'
       GROUP BY DATE_TRUNC('day', ua.answered_at)
@@ -357,24 +349,22 @@ const getFailedQuestionsProgress = async (req, res) => {
     const improvementQuery = `
       WITH failed_questions AS (
         SELECT DISTINCT q.id as question_id
-        FROM user_answers ua
-        JOIN exam_questions eq ON ua.exam_question_id = eq.id
-        JOIN questions q ON eq.question_id = q.id
+        FROM exam_answers ua
+        JOIN questions q ON ua.question_id = q.id
         JOIN topics t ON q.topic_id = t.id
         JOIN certifications c ON t.certification_id = c.id
         JOIN providers p ON c.provider_id = p.id
-        JOIN exams e ON eq.exam_id = e.id
+        JOIN exams e ON ua.exam_id = e.id
         WHERE ${whereClause} AND ua.is_correct = false
       ),
       recently_correct AS (
         SELECT DISTINCT q.id as question_id
-        FROM user_answers ua
-        JOIN exam_questions eq ON ua.exam_question_id = eq.id
-        JOIN questions q ON eq.question_id = q.id
+        FROM exam_answers ua
+        JOIN questions q ON ua.question_id = q.id
         JOIN topics t ON q.topic_id = t.id
         JOIN certifications c ON t.certification_id = c.id
         JOIN providers p ON c.provider_id = p.id
-        JOIN exams e ON eq.exam_id = e.id
+        JOIN exams e ON ua.exam_id = e.id
         WHERE ${whereClause} 
           AND ua.is_correct = true
           AND ua.answered_at >= NOW() - INTERVAL '${intervalDays} days'
@@ -445,7 +435,7 @@ const markQuestionAsFailed = async (req, res) => {
     // Log this as a failed attempt (could be tracked in a separate user_failed_questions table)
     // For now, we'll use the audit log
     await ExamService.pool.query(`
-      INSERT INTO audit_log (user_id, action, entity_type, entity_id, metadata, created_at)
+      INSERT INTO audit_logs (user_id, action, entity_type, entity_id, new_values, created_at)
       VALUES ($1, 'mark_failed', 'question', $2, $3, CURRENT_TIMESTAMP)
     `, [userId, questionId, JSON.stringify({ examId, markedManually: true })]);
 
@@ -478,7 +468,7 @@ const removeFromFailedQuestions = async (req, res) => {
 
     // Log the removal
     await ExamService.pool.query(`
-      INSERT INTO audit_log (user_id, action, entity_type, entity_id, metadata, created_at)
+      INSERT INTO audit_logs (user_id, action, entity_type, entity_id, new_values, created_at)
       VALUES ($1, 'remove_from_failed', 'question', $2, $3, CURRENT_TIMESTAMP)
     `, [userId, questionId, JSON.stringify({ removedManually: true })]);
 
@@ -530,13 +520,12 @@ const getStudyRecommendations = async (req, res) => {
         SUM(CASE WHEN ua.is_correct THEN 1 ELSE 0 END) as correct,
         ROUND(AVG(CASE WHEN ua.is_correct THEN 100.0 ELSE 0.0 END), 1) as accuracy,
         (SELECT COUNT(*) FROM questions q2 WHERE q2.topic_id = t.id AND q2.is_active = true) as available_questions
-      FROM user_answers ua
-      JOIN exam_questions eq ON ua.exam_question_id = eq.id
-      JOIN questions q ON eq.question_id = q.id
+      FROM exam_answers ua
+      JOIN questions q ON ua.question_id = q.id
       JOIN topics t ON q.topic_id = t.id
       JOIN certifications c ON t.certification_id = c.id
       JOIN providers p ON c.provider_id = p.id
-      JOIN exams e ON eq.exam_id = e.id
+      JOIN exams e ON ua.exam_id = e.id
       WHERE ${whereClause}
       GROUP BY t.id, t.name, c.name
       HAVING COUNT(ua.id) >= 3
@@ -556,13 +545,12 @@ const getStudyRecommendations = async (req, res) => {
           WHEN AVG(CASE WHEN ua.is_correct THEN 100.0 ELSE 0.0 END) < 85 THEN 10
           ELSE 5
         END as recommended_questions
-      FROM user_answers ua
-      JOIN exam_questions eq ON ua.exam_question_id = eq.id
-      JOIN questions q ON eq.question_id = q.id
+      FROM exam_answers ua
+      JOIN questions q ON ua.question_id = q.id
       JOIN topics t ON q.topic_id = t.id
       JOIN certifications c ON t.certification_id = c.id
       JOIN providers p ON c.provider_id = p.id
-      JOIN exams e ON eq.exam_id = e.id
+      JOIN exams e ON ua.exam_id = e.id
       WHERE ${whereClause}
       GROUP BY t.id, t.name
       ORDER BY accuracy ASC

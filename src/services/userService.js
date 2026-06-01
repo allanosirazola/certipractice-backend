@@ -453,7 +453,7 @@ class UserService {
         SELECT 
           b.*,
           q.question_text,
-          q.difficulty_level,
+          q.difficulty,
           t.name as topic_name,
           c.name as certification_name
         FROM bookmarks b
@@ -474,22 +474,29 @@ class UserService {
 
   async getUserErrorResponses(userId, limit = 20) {
     try {
+      // Derived from exam_answers (the real table) — there is no dedicated
+      // error_responses table. Aggregates the user's incorrect answers per
+      // question, most-recent / most-failed first.
       const query = `
-        SELECT 
-          er.*,
+        SELECT
+          q.id as question_id,
           q.question_text,
-          q.difficulty_level,
+          q.difficulty,
           t.name as topic_name,
-          c.name as certification_name
-        FROM error_responses er
-        JOIN questions q ON er.question_id = q.id
+          c.name as certification_name,
+          COUNT(*) as error_count,
+          MAX(ua.answered_at) as last_error_date
+        FROM exam_answers ua
+        JOIN exams e ON ua.exam_id = e.id
+        JOIN questions q ON ua.question_id = q.id
         JOIN topics t ON q.topic_id = t.id
         JOIN certifications c ON t.certification_id = c.id
-        WHERE er.user_id = $1
-        ORDER BY er.last_error_date DESC, er.error_count DESC
+        WHERE e.user_id = $1 AND ua.is_correct = false
+        GROUP BY q.id, q.question_text, q.difficulty, t.name, c.name
+        ORDER BY last_error_date DESC, error_count DESC
         LIMIT $2
       `;
-      
+
       const result = await db.query(query, [userId, limit]);
       return result.rows;
     } catch (error) {
@@ -526,29 +533,27 @@ class UserService {
   async getUserActivity(userId, limit = 50) {
     try {
       const query = `
-        SELECT 
+        SELECT
           'exam' as activity_type,
-          e.id as activity_id,
-          e.status,
+          e.id::text as activity_id,
+          e.status::text as status,
           e.score,
-          e.percentage_score,
-          e.passing_status,
+          e.passed,
           e.created_at,
           e.completed_at,
           c.name as certification_name
         FROM exams e
         JOIN certifications c ON e.certification_id = c.id
         WHERE e.user_id = $1
-        
+
         UNION ALL
-        
-        SELECT 
+
+        SELECT
           'bookmark' as activity_type,
-          b.id as activity_id,
+          b.id::text as activity_id,
           'bookmarked' as status,
           NULL as score,
-          NULL as percentage_score,
-          NULL as passing_status,
+          NULL as passed,
           b.created_at,
           b.created_at as completed_at,
           c.name as certification_name

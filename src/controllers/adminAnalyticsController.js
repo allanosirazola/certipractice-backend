@@ -249,7 +249,7 @@ const getQuestionAnalytics = async (req, res) => {
         `SELECT
            qe.question_id,
            q.question_text,
-           q.difficulty_level,
+           q.difficulty,
            t.name AS topic_name,
            c.name AS certification_name,
            COUNT(*) FILTER (WHERE qe.event_type = 'answered') AS attempts,
@@ -263,7 +263,7 @@ const getQuestionAnalytics = async (req, res) => {
          LEFT JOIN topics t ON q.topic_id = t.id
          LEFT JOIN certifications c ON t.certification_id = c.id
          WHERE qe.created_at >= NOW() - ${intervalSql}
-         GROUP BY qe.question_id, q.question_text, q.difficulty_level, t.name, c.name
+         GROUP BY qe.question_id, q.question_text, q.difficulty, t.name, c.name
          HAVING COUNT(*) FILTER (WHERE qe.event_type = 'answered') >= 5
          ORDER BY fail_rate DESC, attempts DESC
          LIMIT $1`,
@@ -329,7 +329,7 @@ const getQuestionAnalytics = async (req, res) => {
       // Performance by difficulty
       pool.query(
         `SELECT
-           q.difficulty_level,
+           q.difficulty,
            COUNT(*) FILTER (WHERE qe.event_type = 'answered') AS attempts,
            ROUND(
              100.0 * COUNT(*) FILTER (WHERE qe.event_type = 'answered' AND qe.is_correct = true)
@@ -339,9 +339,9 @@ const getQuestionAnalytics = async (req, res) => {
          FROM question_events qe
          JOIN questions q ON qe.question_id = q.id
          WHERE qe.created_at >= NOW() - ${intervalSql}
-         GROUP BY q.difficulty_level
+         GROUP BY q.difficulty
          ORDER BY
-           CASE q.difficulty_level
+           CASE q.difficulty
              WHEN 'easy' THEN 1 WHEN 'medium' THEN 2 WHEN 'hard' THEN 3 WHEN 'expert' THEN 4
            END`
       ),
@@ -357,7 +357,7 @@ const getQuestionAnalytics = async (req, res) => {
         mostFailedQuestions: mostFailed.rows.map((r) => ({
           questionId: r.question_id,
           preview: truncateText(r.question_text),
-          difficulty: r.difficulty_level,
+          difficulty: r.difficulty,
           topicName: r.topic_name,
           certificationName: r.certification_name,
           attempts: parseInt(r.attempts),
@@ -380,7 +380,7 @@ const getQuestionAnalytics = async (req, res) => {
           questions: parseInt(r.questions),
         })),
         byDifficulty: byDifficulty.rows.map((r) => ({
-          difficulty: r.difficulty_level,
+          difficulty: r.difficulty,
           attempts: parseInt(r.attempts) || 0,
           accuracyRate: r.accuracy_rate ? parseFloat(r.accuracy_rate) : null,
           averageTimeSeconds: r.avg_time_seconds ? Math.round(parseFloat(r.avg_time_seconds)) : null,
