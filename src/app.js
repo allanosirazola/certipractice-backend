@@ -49,18 +49,33 @@ app.use(helmet({
 }));
 
 // CORS configuration
+// Production domains are always allowed so a missing/short ALLOWED_ORIGINS env
+// var can't break the live site. Extra origins can still be added via
+// ALLOWED_ORIGINS (comma-separated). Vercel preview deployments are allowed too.
+const STATIC_ALLOWED_ORIGINS = [
+  'https://certipractice.com',
+  'https://www.certipractice.com',
+  'https://certipractice.vercel.app',
+  'http://localhost:5173',
+  'http://localhost:3000',
+];
+
+const isAllowedOrigin = (origin) => {
+  const configured = config.allowedOrigins || [];
+  if (STATIC_ALLOWED_ORIGINS.includes(origin)) return true;
+  if (configured.includes(origin)) return true;
+  if (process.env.FRONTEND_URL && origin === process.env.FRONTEND_URL) return true;
+  // Allow Vercel preview deployments (e.g. certipractice-*.vercel.app).
+  if (/^https:\/\/[a-z0-9-]+\.vercel\.app$/i.test(origin)) return true;
+  return false;
+};
+
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow requests with no origin (mobile apps, Postman, etc.)
+    // Allow requests with no origin (mobile apps, Postman, server-to-server).
     if (!origin) return callback(null, true);
-    
-    const allowedOrigins = config.allowedOrigins || [
-      'http://localhost:5173',
-      'http://localhost:3000',
-      process.env.FRONTEND_URL,
-    ].filter(Boolean);
-    
-    if (allowedOrigins.includes(origin)) {
+
+    if (isAllowedOrigin(origin)) {
       callback(null, true);
     } else {
       logger.warn('CORS blocked request from:', origin);

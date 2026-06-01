@@ -61,7 +61,7 @@ function generateVerificationToken() {
 function buildVerificationUrl(token, req) {
   const base = process.env.FRONTEND_URL
     || (req?.headers?.origin)
-    || 'https://certipractice.vercel.app';
+    || 'https://certipractice.com';
   return `${String(base).replace(/\/+$/, '')}/verify-email?token=${encodeURIComponent(token)}`;
 }
 
