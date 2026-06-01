@@ -24,6 +24,20 @@ const ExamMode = {
   FAILED_QUESTIONS: 'failed_questions',
 };
 
+// UI exam modes accepted on the API boundary. The frontend sends labels like
+// 'realistic'/'timed' that aren't 1:1 with the DB ExamMode enum; ExamService
+// maps them to a valid DB value before persisting. Validation must accept all
+// of them so a real-exam request isn't rejected.
+const ACCEPTED_MODES = [
+  'practice',
+  'exam',
+  'realistic',
+  'timed',
+  'review',
+  'simulation',
+  'failed_questions',
+];
+
 /**
  * Map database status to client format
  */
@@ -126,8 +140,8 @@ class Exam {
     }
 
     // Mode validation
-    if (data.mode && !Object.values(ExamMode).includes(data.mode)) {
-      errors.push(`Mode must be one of: ${Object.values(ExamMode).join(', ')}`);
+    if (data.mode && !ACCEPTED_MODES.includes(data.mode)) {
+      errors.push(`Mode must be one of: ${ACCEPTED_MODES.join(', ')}`);
     }
 
     // Question count validation
