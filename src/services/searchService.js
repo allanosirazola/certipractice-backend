@@ -1,20 +1,19 @@
 /**
  * @fileoverview Search Service
  *
- * Full-text search over the question bank using PostgreSQL's tsvector
- * (column `search_vector` is generated and indexed by a GIN, see migration
- * 20260510_add_engagement).
+ * Full-text search over the question bank using PostgreSQL full-text search.
+ *
+ * The tsvector is computed on the fly from question_text + explanation rather
+ * than relying on a generated `search_vector` column (that column is not part
+ * of the current schema). This keeps search working without a DB migration;
+ * if the question bank grows large, a generated column + GIN index can be
+ * added later for performance and SEARCH_VECTOR_SQL swapped for `q.search_vector`.
  *
  * Strategy:
- *   - Sanitize the user query into a tsquery using `plainto_tsquery` for
- *     short inputs and `websearch_to_tsquery` for natural language.
- *     `websearch_to_tsquery` understands quoted phrases and OR / -terms.
- *   - Rank with `ts_rank_cd` and order by rank desc.
+ *   - websearch_to_tsquery understands quoted phrases and OR / -terms.
+ *   - Rank with ts_rank_cd and order by rank desc.
  *   - Optional filters: certificationId, providerId, difficulty.
  *   - Hard limit 50 to avoid runaway queries.
- *
- * Returns lightweight rows (id, preview, topic, etc.) — full content is
- * fetched via the existing `GET /questions/:id` endpoint.
  */
 
 const pool = require('../database/pool');
@@ -24,6 +23,12 @@ const MIN_QUERY_LENGTH = 2;
 const MAX_QUERY_LENGTH = 200;
 const MAX_LIMIT = 50;
 const DEFAULT_LIMIT = 20;
+
+// Inline document vector: title weighted higher (A) than explanation (B).
+const SEARCH_VECTOR_SQL = `(
+  setweight(to_tsvector('simple', coalesce(q.question_text, '')), 'A') ||
+  setweight(to_tsvector('simple', coalesce(q.explanation, '')), 'B')
+)`;
 
 class SearchService {
   /**
@@ -55,7 +60,7 @@ class SearchService {
 
     // Build dynamic WHERE: search + optional filters
     const conditions = [
-      `q.search_vector @@ websearch_to_tsquery('simple', $1)`,
+      `${SEARCH_VECTOR_SQL} @@ websearch_to_tsquery('simple', $1)`,
       `q.review_status = 'approved'`,
     ];
     const params = [cleanQuery];
@@ -89,7 +94,7 @@ class SearchService {
            t.name AS topic_name,
            c.name AS certification_name,
            p.name AS provider_name,
-           ts_rank_cd(q.search_vector, websearch_to_tsquery('simple', $1)) AS rank,
+           ts_rank_cd(${SEARCH_VECTOR_SQL}, websearch_to_tsquery('simple', $1)) AS rank,
            ts_headline(
              'simple', q.question_text,
              websearch_to_tsquery('simple', $1),
