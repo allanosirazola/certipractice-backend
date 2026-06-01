@@ -7,380 +7,91 @@ const studyPlanService = require('../services/studyPlanService');
 
 const createExam = async (req, res) => {
   try {
-    // ACTUALIZADO: Datos mínimos requeridos para crear un examen
-    const {
-      provider,
-      certification,
-      mode = 'practice',
-      questionCount,
-      timeLimit,
-      difficulty,
-      category,
-      settings = {}
-    } = req.body;
-
-    // Crear objeto de datos mínimos para validación
-    const minimalExamData = {
-      provider,
-      certification,
-      mode,
-      questionCount,
-      timeLimit,
-      difficulty
-    };
-
-    // Validar solo los datos esenciales
-    const errors = Exam.validate(minimalExamData);
-    if (errors.length > 0) {
-      return res.status(400).json({
-        success: false,
-        error: errors.join(', ')
-      });
-    }
-
     const userId = req.user ? req.user.id : null;
     const sessionId = req.sessionId || null;
 
-    // Validar que tengamos userId O sessionId
-    if (!userId && !sessionId) {
-      logger.error('No userId or sessionId provided for exam creation');
+    // Validate the request against the Exam model rules.
+    const validationErrors = Exam.validate(req.body);
+    if (validationErrors.length > 0) {
       return res.status(400).json({
         success: false,
-        error: 'Session identification required'
+        error: 'Validation failed',
+        details: validationErrors
       });
     }
 
-    logger.info('Creating exam request:', {
-      userId,
-      sessionId,
-      provider,
-      certification,
-      mode,
-      questionCount: questionCount || 'default'
-    });
+    const exam = await ExamService.createExam(req.body, userId, sessionId);
 
-    // ACTUALIZADO: Pasar solo datos necesarios al servicio
-    const examConfig = {
-      provider,
-      certification,
-      mode,
-      questionCount,
-      timeLimit,
-      difficulty,
-      category,
-      settings: {
-        randomizeQuestions: settings.randomizeQuestions !== false,
-        randomizeAnswers: settings.randomizeAnswers === true,
-        showExplanations: mode === 'practice',
-        allowPause: mode === 'practice',
-        allowReview: mode === 'practice',
-        ...settings
-      }
-    };
+    // Don't leak correct answers / explanations on creation.
+    const examData = exam.toJSON();
+    examData.questions = examData.questions.map(q => ({
+      ...q,
+      correctAnswers: undefined,
+      explanation: undefined
+    }));
 
-    const exam = await ExamService.createExam(examConfig, userId, sessionId);
-
-    // Establecer sessionId en la respuesta para usuarios anónimos
-    if (!userId && sessionId) {
-      res.setHeader('X-Session-Id', sessionId);
-    }
-
-    // Telemetry: track exam creation (fire-and-forget)
     telemetry.trackExamEvent({
       examId: exam.id,
       eventType: 'exam_created',
       req,
-      metadata: {
-        provider: exam.provider,
-        certification: exam.certification,
-        mode: exam.mode,
-        questionCount: exam.questionCount || exam.questions?.length,
-      },
+      metadata: { mode: exam.mode, questionCount: examData.questions.length },
     }).catch(() => {});
 
     res.status(201).json({
       success: true,
-      data: exam.toJSON(),
-      sessionId: !userId ? sessionId : undefined
+      data: examData,
+      sessionId: sessionId || undefined,
+      message: 'Exam created successfully'
     });
   } catch (error) {
-    logger.error('Create exam error:', error);
-    
-    // Manejar errores específicos de PostgreSQL
-    if (error.message.includes('No certification found')) {
-      return res.status(404).json({
-        success: false,
-        error: 'Certification not found for the specified provider'
-      });
+    logger.error('Error in createExam controller:', error);
+    if (error.message && error.message.includes('No questions available')) {
+      return res.status(400).json({ success: false, error: error.message });
     }
-    
-    if (error.message.includes('No questions found')) {
-      return res.status(404).json({
-        success: false,
-        error: 'No questions available for the specified criteria'
-      });
+    if (error.message && error.message.includes('certification')) {
+      return res.status(404).json({ success: false, error: error.message });
     }
-
-    res.status(400).json({
-      success: false,
-      error: error.message
-    });
+    res.status(500).json({ success: false, error: 'Failed to create exam' });
   }
 };
 
 const createFailedQuestionsExam = async (req, res) => {
   try {
-    const userId = req.user.id;
-    const {
-      provider,
-      certification, 
-      category,
-      difficulty,
-      questionCount = 20,
-      settings = {}
-    } = req.body;
+    const userId = req.user ? req.user.id : null;
+    const sessionId = req.sessionId || null;
 
-    if (!provider || !certification) {
-      return res.status(400).json({
-        success: false,
-        error: 'Provider and certification are required'
-      });
-    }
+    const exam = await ExamService.createFailedQuestionsExam(req.body, userId, sessionId);
 
-    logger.info('Creating failed questions exam:', {
-      userId, provider, certification, questionCount, category, difficulty
+    const examData = exam.toJSON();
+    examData.questions = examData.questions.map(q => ({
+      ...q,
+      correctAnswers: undefined,
+      explanation: undefined
+    }));
+
+    res.status(201).json({
+      success: true,
+      data: examData,
+      message: `Failed questions exam created with ${examData.questions.length} questions`
     });
-
-    const client = await ExamService.pool.connect();
-    
-    try {
-      // Construir condiciones WHERE y parámetros correctamente
-      let whereConditions = [
-        'e.user_id = $1',
-        'ua.is_correct = false',
-        'e.status = $2',
-        'q.is_active = true',
-        'p.id = $3',
-        'c.id = $4'
-      ];
-      
-      // Array de parámetros - EXACTAMENTE 4 parámetros
-      let queryParams = [
-        userId, 
-        'completed', 
-        provider, 
-        parseInt(certification)
-      ];
-
-      // Calcular límite de preguntas
-      const limitValue = Math.min(parseInt(questionCount), 50);
-
-      // Query principal - usando interpolación directa para LIMIT
-      const failedQuestionsQuery = `
-        SELECT
-          q.id,
-          q.question_text,
-          q.explanation,
-          q.difficulty_level,
-          q.expected_answers_count,
-          qt.name as question_type,
-          t.name as topic_name,
-          COUNT(ua.id) as failed_count
-        FROM user_answers ua
-        JOIN exam_questions eq ON ua.exam_question_id = eq.id
-        JOIN questions q ON eq.question_id = q.id
-        JOIN question_types qt ON q.question_type_id = qt.id
-        JOIN topics t ON q.topic_id = t.id
-        JOIN certifications c ON t.certification_id = c.id
-        JOIN providers p ON c.provider_id = p.id
-        JOIN exams e ON eq.exam_id = e.id
-        WHERE ${whereConditions.join(' AND ')}
-        GROUP BY q.id, q.question_text, q.explanation, q.difficulty_level, 
-                 q.expected_answers_count, qt.name, t.name
-        ORDER BY failed_count DESC, RANDOM()
-        LIMIT ${limitValue}
-      `;
-
-      const failedQuestionsResult = await client.query(failedQuestionsQuery, queryParams);
-      const failedQuestions = failedQuestionsResult.rows;
-
-      if (failedQuestions.length < 5) {
-        return res.status(400).json({
-          success: false,
-          error: `Not enough failed questions found. Minimum 5 required, found ${failedQuestions.length}`,
-          data: {
-            availableQuestions: failedQuestions.length,
-            minimumRequired: 5
-          }
-        });
-      }
-
-      // Obtener datos de certificación
-      const certQuery = `
-        SELECT 
-          c.id, c.name, c.code, c.description, c.duration_minutes, 
-          c.passing_score, c.total_questions,
-          p.name as provider_name, p.description as provider_description
-        FROM certifications c
-        JOIN providers p ON c.provider_id = p.id
-        WHERE c.id = $1 AND c.is_active = true
-      `;
-      const certResult = await client.query(certQuery, [parseInt(certification)]);
-      
-      if (certResult.rows.length === 0) {
-        return res.status(404).json({
-          success: false,
-          error: 'Certification not found'
-        });
-      }
-
-      const certificationData = certResult.rows[0];
-
-      // Construir array de preguntas con opciones
-      const questions = [];
-      for (const questionRow of failedQuestions) {
-        const optionsQuery = `
-          SELECT id, option_label, option_text, is_correct, order_index
-          FROM question_options
-          WHERE question_id = $1
-          ORDER BY order_index
-        `;
-
-        const optionsResult = await client.query(optionsQuery, [questionRow.id]);
-
-        questions.push({
-          id: questionRow.id,
-          text: questionRow.question_text,
-          explanation: questionRow.explanation,
-          difficulty: questionRow.difficulty_level,
-          category: questionRow.topic_name,
-          provider: certificationData.provider_name,
-          questionType: questionRow.question_type,
-          isMultipleChoice: questionRow.question_type === 'multiple_answer',
-          expectedAnswers: questionRow.expected_answers_count,
-          options: optionsResult.rows.map(opt => ({
-            label: opt.option_label,
-            text: opt.option_text
-          })),
-          failedCount: questionRow.failed_count
-        });
-      }
-
-      const timeLimit = Math.ceil(questions.length * 1.5);
-      const examTitle = `${certificationData.provider_name} ${certificationData.name} - Preguntas Fallidas`;
-
-      // Crear examen en transacción
-      await client.query('BEGIN');
-
-      const insertExamQuery = `
-        INSERT INTO exams (
-          user_id, certification_id, exam_mode, status,
-          total_questions, time_limit_minutes, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        RETURNING *
-      `;
-
-      const examValues = [
-        userId,
-        certificationData.id,
-        'failed_questions',
-        'pending',
-        questions.length,
-        timeLimit
-      ];
-
-      const examResult = await client.query(insertExamQuery, examValues);
-      const examRow = examResult.rows[0];
-      const examId = examRow.id;
-
-      // Insertar preguntas del examen
-      const insertQuestionsQuery = `
-        INSERT INTO exam_questions (exam_id, question_id, question_order)
-        VALUES ($1, $2, $3)
-      `;
-
-      const orderedQuestions = settings.randomizeQuestions !== false ? 
-        questions.sort(() => 0.5 - Math.random()) : questions;
-
-      for (let i = 0; i < orderedQuestions.length; i++) {
-        await client.query(insertQuestionsQuery, [
-          examId,
-          orderedQuestions[i].id,
-          i + 1
-        ]);
-      }
-
-      await client.query('COMMIT');
-
-      // Crear objeto Exam
-      const exam = new Exam({
-        id: examId,
-        userId: userId,
-        title: examTitle,
-        provider: certificationData.provider_name,
-        certification: certificationData.code,
-        questions: orderedQuestions,
-        timeLimit: timeLimit,
-        passingScore: certificationData.passing_score || 70,
-        status: 'not_started',
-        createdAt: examRow.created_at,
-        updatedAt: examRow.updated_at,
-        examMode: 'failed_questions',
-        settings: {
-          showExplanations: true,
-          randomizeQuestions: settings.randomizeQuestions !== false,
-          randomizeAnswers: settings.randomizeAnswers === true,
-          allowPause: true,
-          allowReview: true,
-          isFailedQuestionsExam: true,
-          ...settings
-        }
-      });
-
-      logger.info('Failed questions exam created successfully:', {
-        id: examId,
-        title: examTitle,
-        userId: userId,
-        questionCount: exam.questions.length,
-        timeLimit: timeLimit
-      });
-
-      res.status(201).json({
-        success: true,
-        data: exam.toJSON(),
-        message: `Failed questions exam created with ${questions.length} questions`
-      });
-
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
-    }
-
   } catch (error) {
-    logger.error('Create failed questions exam error:', error);
-    
-    if (error.message.includes('Certification not found')) {
-      return res.status(404).json({
-        success: false,
-        error: 'Certification not found'
-      });
+    logger.error('Error in createFailedQuestionsExam controller:', error);
+    if (error.code === 'NOT_ENOUGH_FAILED') {
+      return res.status(400).json({ success: false, error: error.message });
     }
-    
-    if (error.message.includes('Not enough failed questions')) {
-      return res.status(400).json({
-        success: false,
-        error: error.message
-      });
+    if (error.message && error.message.includes('Authentication required')) {
+      return res.status(401).json({ success: false, error: error.message });
     }
-
+    if (error.message && error.message.includes('not found')) {
+      return res.status(404).json({ success: false, error: error.message });
+    }
     res.status(500).json({
       success: false,
       error: 'Server error while creating failed questions exam'
     });
   }
 };
+
 const getUserExams = async (req, res) => {
   try {
     const filters = {
@@ -701,7 +412,7 @@ const completeExam = async (req, res) => {
     // Incluir todas las respuestas correctas y explicaciones en el examen completado
     const examData = exam.toJSON();
     const results = exam.getResults();
-    const analysis = exam.getAnalysis();
+    const analysis = typeof exam.getAnalysis === 'function' ? exam.getAnalysis() : null;
 
     // Telemetry: track exam completion
     telemetry.trackExamEvent({
@@ -779,7 +490,7 @@ const getExamResults = async (req, res) => {
       });
     }
 
-    const analysis = exam.getAnalysis();
+    const analysis = typeof exam.getAnalysis === 'function' ? exam.getAnalysis() : null;
     const summary = exam.getSummary();
     
     // Incluir información adicional para revisión
@@ -1110,8 +821,8 @@ const getExamStatistics = async (req, res) => {
           byCategory: results.categoryStats,
           byDifficulty: results.difficultyStats,
           byQuestionType: {
-            multipleChoice: results.multipleChoiceStats,
-            singleChoice: results.singleChoiceStats
+            multipleChoice: progress.multipleChoiceProgress,
+            singleChoice: progress.singleChoiceProgress
           }
         },
         timeAnalysis: {
@@ -1137,164 +848,82 @@ const pauseExam = async (req, res) => {
   try {
     const userId = req.user ? req.user.id : null;
     const sessionId = req.sessionId || null;
-    
+
     const exam = await ExamService.getExamById(req.params.id, userId, sessionId);
-    
     if (!exam) {
-      return res.status(404).json({
-        success: false,
-        error: 'Exam not found'
-      });
+      return res.status(404).json({ success: false, error: 'Exam not found' });
     }
-
     if (!exam.belongsTo(userId, sessionId)) {
-      return res.status(403).json({
-        success: false,
-        error: 'Unauthorized to access this exam'
-      });
+      return res.status(403).json({ success: false, error: 'Unauthorized to access this exam' });
     }
-
     if (exam.status !== 'in_progress') {
-      return res.status(400).json({
-        success: false,
-        error: 'Only active exams can be paused'
-      });
+      return res.status(400).json({ success: false, error: 'Only active exams can be paused' });
     }
 
-    // Actualizar estado a pausado en la base de datos
-    const client = await ExamService.pool.connect();
-    try {
-      await client.query(`
-        UPDATE exams 
-        SET status = 'paused', updated_at = CURRENT_TIMESTAMP 
-        WHERE id = $1
-      `, [req.params.id]);
-      
-      res.json({
-        success: true,
-        message: 'Exam paused successfully',
-        data: {
-          examId: exam.id,
-          status: 'paused',
-          pausedAt: new Date().toISOString()
-        }
-      });
+    await ExamService.setExamStatus(req.params.id, 'paused', 'paused_at = NOW()');
 
-      telemetry.trackExamEvent({
-        examId: exam.id,
-        eventType: 'exam_paused',
-        req,
-      }).catch(() => {});
-    } finally {
-      client.release();
-    }
+    res.json({
+      success: true,
+      message: 'Exam paused successfully',
+      data: { examId: exam.id, status: 'paused', pausedAt: new Date().toISOString() }
+    });
+
+    telemetry.trackExamEvent({ examId: exam.id, eventType: 'exam_paused', req }).catch(() => {});
   } catch (error) {
     logger.error('Pause exam error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Server error while pausing exam'
-    });
+    res.status(500).json({ success: false, error: 'Server error while pausing exam' });
   }
 };
 
-// NUEVO: Reanudar examen pausado
 const resumeExam = async (req, res) => {
   try {
     const userId = req.user ? req.user.id : null;
     const sessionId = req.sessionId || null;
-    
+
     const exam = await ExamService.getExamById(req.params.id, userId, sessionId);
-    
     if (!exam) {
-      return res.status(404).json({
-        success: false,
-        error: 'Exam not found'
-      });
+      return res.status(404).json({ success: false, error: 'Exam not found' });
     }
-
     if (!exam.belongsTo(userId, sessionId)) {
-      return res.status(403).json({
-        success: false,
-        error: 'Unauthorized to access this exam'
-      });
+      return res.status(403).json({ success: false, error: 'Unauthorized to access this exam' });
     }
-
     if (exam.status !== 'paused') {
-      return res.status(400).json({
-        success: false,
-        error: 'Only paused exams can be resumed'
-      });
+      return res.status(400).json({ success: false, error: 'Only paused exams can be resumed' });
     }
 
-    // Verificar si el tiempo no ha expirado
-    if (exam.isTimeExpired()) {
-      return res.status(400).json({
-        success: false,
-        error: 'Exam time has expired and cannot be resumed'
-      });
-    }
+    await ExamService.setExamStatus(req.params.id, 'active');
+    const updatedExam = await ExamService.getExamById(req.params.id, userId, sessionId);
 
-    // Actualizar estado a activo en la base de datos
-    const client = await ExamService.pool.connect();
-    try {
-      await client.query(`
-        UPDATE exams 
-        SET status = 'active', updated_at = CURRENT_TIMESTAMP 
-        WHERE id = $1
-      `, [req.params.id]);
-      
-      const updatedExam = await ExamService.getExamById(req.params.id, userId, sessionId);
-      
-      res.json({
-        success: true,
-        message: 'Exam resumed successfully',
-        data: {
-          exam: updatedExam.getSummary(),
-          timeRemaining: updatedExam.getTimeRemaining()
-        }
-      });
+    res.json({
+      success: true,
+      message: 'Exam resumed successfully',
+      data: {
+        exam: updatedExam.getSummary(),
+        timeRemaining: updatedExam.getTimeRemaining()
+      }
+    });
 
-      telemetry.trackExamEvent({
-        examId: exam.id,
-        eventType: 'exam_resumed',
-        req,
-      }).catch(() => {});
-    } finally {
-      client.release();
-    }
+    telemetry.trackExamEvent({ examId: exam.id, eventType: 'exam_resumed', req }).catch(() => {});
   } catch (error) {
     logger.error('Resume exam error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Server error while resuming exam'
-    });
+    res.status(500).json({ success: false, error: 'Server error while resuming exam' });
   }
 };
 
-// NUEVO: Cancelar examen (abandonar sin completar)
 const cancelExam = async (req, res) => {
   try {
     const userId = req.user ? req.user.id : null;
     const sessionId = req.sessionId || null;
-    
+
     const exam = await ExamService.getExamById(req.params.id, userId, sessionId);
-    
     if (!exam) {
-      return res.status(404).json({
-        success: false,
-        error: 'Exam not found'
-      });
+      return res.status(404).json({ success: false, error: 'Exam not found' });
     }
-
     if (!exam.belongsTo(userId, sessionId)) {
-      return res.status(403).json({
-        success: false,
-        error: 'Unauthorized to access this exam'
-      });
+      return res.status(403).json({ success: false, error: 'Unauthorized to access this exam' });
     }
 
-    // Solo se pueden cancelar exámenes activos, pausados o pendientes
-    const cancelableStatuses = ['pending', 'active', 'in_progress', 'paused'];
+    const cancelableStatuses = ['not_started', 'in_progress', 'paused'];
     if (!cancelableStatuses.includes(exam.status)) {
       return res.status(400).json({
         success: false,
@@ -1302,145 +931,82 @@ const cancelExam = async (req, res) => {
       });
     }
 
-    // Actualizar estado a cancelado en la base de datos
-    const client = await ExamService.pool.connect();
-    try {
-      await client.query(`
-        UPDATE exams 
-        SET status = 'cancelled', 
-            updated_at = CURRENT_TIMESTAMP,
-            completed_at = CURRENT_TIMESTAMP
-        WHERE id = $1
-      `, [req.params.id]);
-      
-      logger.info(`Exam cancelled: ${req.params.id} by user: ${userId || sessionId}`);
-      
-      res.json({
-        success: true,
-        message: 'Exam cancelled successfully',
-        data: {
-          examId: exam.id,
-          status: 'cancelled',
-          cancelledAt: new Date().toISOString()
-        }
-      });
+    // DB enum uses 'abandoned' for cancelled exams.
+    await ExamService.setExamStatus(req.params.id, 'abandoned', 'completed_at = NOW()');
 
-      telemetry.trackExamEvent({
-        examId: exam.id,
-        eventType: 'exam_cancelled',
-        req,
-        metadata: { previousStatus: exam.status },
-      }).catch(() => {});
-    } finally {
-      client.release();
-    }
+    logger.info(`Exam cancelled: ${req.params.id} by user: ${userId || sessionId}`);
+
+    res.json({
+      success: true,
+      message: 'Exam cancelled successfully',
+      data: { examId: exam.id, status: 'cancelled', cancelledAt: new Date().toISOString() }
+    });
+
+    telemetry.trackExamEvent({
+      examId: exam.id,
+      eventType: 'exam_cancelled',
+      req,
+      metadata: { previousStatus: exam.status },
+    }).catch(() => {});
   } catch (error) {
     logger.error('Cancel exam error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Server error while cancelling exam'
-    });
+    res.status(500).json({ success: false, error: 'Server error while cancelling exam' });
   }
 };
 
-// NUEVO: Toggle flag en una pregunta (marcar para revisión)
 const toggleQuestionFlag = async (req, res) => {
   try {
     const userId = req.user ? req.user.id : null;
     const sessionId = req.sessionId || null;
     const examId = req.params.id;
     const questionId = req.params.questionId || req.body.questionId;
-    
+
     if (!questionId) {
-      return res.status(400).json({
-        success: false,
-        error: 'Question ID is required'
-      });
+      return res.status(400).json({ success: false, error: 'Question ID is required' });
     }
-    
+
     const exam = await ExamService.getExamById(examId, userId, sessionId);
-    
     if (!exam) {
-      return res.status(404).json({
-        success: false,
-        error: 'Exam not found'
-      });
+      return res.status(404).json({ success: false, error: 'Exam not found' });
     }
-
     if (!exam.belongsTo(userId, sessionId)) {
-      return res.status(403).json({
-        success: false,
-        error: 'Unauthorized to access this exam'
-      });
+      return res.status(403).json({ success: false, error: 'Unauthorized to access this exam' });
     }
-
-    // Solo se pueden marcar preguntas en exámenes activos
     if (!['active', 'in_progress'].includes(exam.status)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Can only flag questions in active exams'
-      });
+      return res.status(400).json({ success: false, error: 'Can only flag questions in active exams' });
     }
 
-    // Toggle flag en la base de datos
-    const client = await ExamService.pool.connect();
+    let isFlagged;
     try {
-      // Verificar que la pregunta existe en el examen
-      const checkQuery = `
-        SELECT eq.id, COALESCE(ua.is_flagged, false) as is_flagged
-        FROM exam_questions eq
-        LEFT JOIN user_answers ua ON eq.id = ua.exam_question_id
-        WHERE eq.exam_id = $1 AND eq.question_id = $2
-      `;
-      const checkResult = await client.query(checkQuery, [examId, questionId]);
-      
-      if (checkResult.rows.length === 0) {
-        return res.status(404).json({
-          success: false,
-          error: 'Question not found in this exam'
-        });
+      isFlagged = await ExamService.toggleQuestionFlag(examId, questionId);
+    } catch (e) {
+      if (e.message && e.message.includes('not found')) {
+        return res.status(404).json({ success: false, error: 'Question not found in this exam' });
       }
-
-      const examQuestionId = checkResult.rows[0].id;
-      const currentFlag = checkResult.rows[0].is_flagged;
-      const newFlag = !currentFlag;
-
-      // Actualizar o crear el registro de respuesta con el flag
-      const upsertQuery = `
-        INSERT INTO user_answers (exam_question_id, is_flagged, answered_at)
-        VALUES ($1, $2, CURRENT_TIMESTAMP)
-        ON CONFLICT (exam_question_id) 
-        DO UPDATE SET is_flagged = $2, answered_at = CURRENT_TIMESTAMP
-        RETURNING is_flagged
-      `;
-      const result = await client.query(upsertQuery, [examQuestionId, newFlag]);
-      
-      res.json({
-        success: true,
-        data: {
-          questionId,
-          isFlagged: result.rows[0].is_flagged,
-          message: newFlag ? 'Question flagged for review' : 'Question unflagged'
-        }
-      });
-
-      telemetry.trackExamEvent({
-        examId,
-        eventType: newFlag ? 'exam_question_flagged' : 'exam_question_unflagged',
-        req,
-        metadata: { questionId },
-      }).catch(() => {});
-    } finally {
-      client.release();
+      throw e;
     }
+
+    res.json({
+      success: true,
+      data: {
+        questionId,
+        isFlagged,
+        message: isFlagged ? 'Question flagged for review' : 'Question unflagged'
+      }
+    });
+
+    telemetry.trackExamEvent({
+      examId,
+      eventType: isFlagged ? 'exam_question_flagged' : 'exam_question_unflagged',
+      req,
+      metadata: { questionId },
+    }).catch(() => {});
   } catch (error) {
     logger.error('Toggle question flag error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Server error while toggling question flag'
-    });
+    res.status(500).json({ success: false, error: 'Server error while toggling question flag' });
   }
 };
+
 
 module.exports = {
   createExam,

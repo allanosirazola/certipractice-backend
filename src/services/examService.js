@@ -1,283 +1,175 @@
-const { Pool } = require('pg');
-const { v4: uuidv4 } = require('uuid');
+// src/services/examService.js - Rewritten for the current PostgreSQL schema.
+//
+// Schema notes (see prisma/schema.prisma):
+//   exams        : id(uuid), user_id(int?), session_id(varchar?), certification_id(int),
+//                  title, description?, mode(ExamMode: practice|timed|review|simulation),
+//                  question_count, time_limit(min), passing_score(numeric), status
+//                  (ExamStatus: pending|active|paused|completed|abandoned), score,
+//                  passed, current_index, settings(jsonb), started_at, completed_at,
+//                  paused_at, total_paused_time, created_at, updated_at
+//   exam_answers : id(uuid), exam_id(uuid), question_id(uuid), order_index,
+//                  user_answer(jsonb array of 0-based option indices), is_correct,
+//                  time_spent, flagged, answered_at, created_at
+//
+// There is NO exam_questions or user_answers table — exam_answers IS the per-question
+// row for an exam (order_index gives ordering, user_answer the response).
+const pool = require('../database/pool');
 const Exam = require('../models/Exam');
 const QuestionService = require('./questionService');
 const UserService = require('./userService');
 const logger = require('../utils/logger');
 
+// ExamMode values accepted by the DB enum. UI-only modes (e.g. failed_questions)
+// are stored as 'practice'.
+const DB_EXAM_MODES = new Set(['practice', 'timed', 'review', 'simulation']);
+const toDbMode = (mode) => (DB_EXAM_MODES.has(mode) ? mode : 'practice');
+
 class ExamService {
   constructor() {
-    this.pool = new Pool({
-      host: process.env.DB_HOST || 'localhost',
-      port: process.env.DB_PORT || 5432,
-      database: process.env.DB_NAME || 'exam_system',
-      user: process.env.DB_USER || 'postgres',
-      password: process.env.DB_PASSWORD,
-      max: 20,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 2000,
-    });
+    // Reuse the shared pool wrapper (handles DATABASE_URL + SSL for Railway).
+    this.pool = pool;
   }
 
- // SIMPLIFICADO: createExam con usuario temporal para sesiones anónimas
+  // ──────────────────────────────────────────────────────────────────────────
+  // Helpers
+  // ──────────────────────────────────────────────────────────────────────────
+
+  // Correct option indices (0-based) for a question.
+  async _getCorrectIndices(client, questionId) {
+    const res = await client.query(
+      `SELECT order_index FROM question_options
+       WHERE question_id = $1 AND is_correct = true
+       ORDER BY order_index`,
+      [questionId]
+    );
+    // order_index is 1-based in the DB; the client/exam model uses 0-based.
+    return res.rows.map((r) => r.order_index - 1);
+  }
+
+  _isAnswerCorrect(answerArr, correctIndices) {
+    const a = [...answerArr].map(Number).sort((x, y) => x - y);
+    const b = [...correctIndices].map(Number).sort((x, y) => x - y);
+    return a.length === b.length && a.every((v, i) => v === b[i]);
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Creation
+  // ──────────────────────────────────────────────────────────────────────────
+
   async createExam(examConfig, userId = null, sessionId = null) {
+    if (!userId && !sessionId) {
+      throw new Error('Either userId or sessionId is required');
+    }
+
+    const certificationId = parseInt(examConfig.certification, 10);
+    if (Number.isNaN(certificationId)) {
+      throw new Error('Certification must be a numeric ID');
+    }
+
     const client = await this.pool.connect();
-    let transactionStarted = false;
-    
     try {
-      logger.info('Creating exam with config:', {
+      // Certification info + per-cert exam config (COALESCE defaults keep this
+      // working before the post-migration script populates the columns).
+      const certResult = await client.query(
+        `SELECT c.id, c.name, c.code,
+                COALESCE(c.num_questions, 60)    AS num_questions,
+                COALESCE(c.duration_minutes, 90) AS duration_minutes,
+                COALESCE(c.passing_score, 70)    AS passing_score,
+                p.name AS provider_name
+         FROM certifications c
+         JOIN providers p ON c.provider_id = p.id
+         WHERE c.id = $1 AND c.is_active = true`,
+        [certificationId]
+      );
+      if (certResult.rows.length === 0) {
+        throw new Error(`No active certification found for ID ${certificationId}`);
+      }
+      const cert = certResult.rows[0];
+
+      // How many questions: explicit request → cert config → default.
+      const requestedCount =
+        parseInt(examConfig.questionCount, 10) || cert.num_questions || 60;
+      const timeLimit =
+        parseInt(examConfig.timeLimit, 10) || cert.duration_minutes || 90;
+      const passingScore = examConfig.passingScore || cert.passing_score || 70;
+      const dbMode = toDbMode(examConfig.mode);
+
+      // Draw questions (Question model instances, options already joined,
+      // only active + approved). Filter by certification id.
+      const questionObjs = await QuestionService.getRandomQuestions(requestedCount, {
+        certification: certificationId,
+        category: examConfig.category,
+      });
+      if (!questionObjs || questionObjs.length === 0) {
+        throw new Error(
+          `No questions available for certification ID ${certificationId}`
+        );
+      }
+
+      const title = `${cert.provider_name} - ${cert.name}`;
+      const settings = {
+        showExplanations: examConfig.settings?.showExplanations ?? dbMode === 'practice',
+        randomizeQuestions: examConfig.settings?.randomizeQuestions !== false,
+        randomizeAnswers: examConfig.settings?.randomizeAnswers === true,
+        allowPause: examConfig.settings?.allowPause ?? dbMode === 'practice',
+        allowReview: examConfig.settings?.allowReview ?? dbMode === 'practice',
+        ...examConfig.settings,
+      };
+
+      await client.query('BEGIN');
+
+      const examInsert = await client.query(
+        `INSERT INTO exams (
+           user_id, session_id, certification_id, title, mode, question_count,
+           time_limit, passing_score, status, settings, created_at, updated_at
+         ) VALUES ($1, $2, $3, $4, $5::"ExamMode", $6, $7, $8, 'pending', $9::jsonb, NOW(), NOW())
+         RETURNING *`,
+        [
+          userId,
+          sessionId,
+          cert.id,
+          title,
+          dbMode,
+          questionObjs.length,
+          timeLimit,
+          passingScore,
+          JSON.stringify(settings),
+        ]
+      );
+      const examRow = examInsert.rows[0];
+
+      // One exam_answers row per question (the exam's question set + ordering).
+      const ordered = settings.randomizeQuestions
+        ? [...questionObjs].sort(() => 0.5 - Math.random())
+        : questionObjs;
+
+      for (let i = 0; i < ordered.length; i++) {
+        await client.query(
+          `INSERT INTO exam_answers (exam_id, question_id, order_index, created_at)
+           VALUES ($1, $2, $3, NOW())
+           ON CONFLICT (exam_id, question_id) DO NOTHING`,
+          [examRow.id, ordered[i].id, i + 1]
+        );
+      }
+
+      await client.query('COMMIT');
+
+      logger.info('Exam created', {
+        examId: examRow.id,
+        certificationId: cert.id,
+        questionCount: ordered.length,
         userId,
         sessionId,
-        provider: examConfig.provider,
-        certification: examConfig.certification,
-        mode: examConfig.mode
       });
 
-      // Validar que tengamos userId O sessionId
-      if (!userId && !sessionId) {
-        throw new Error('Either userId or sessionId is required');
-      }
-
-      // 🆔 CREAR USUARIO TEMPORAL si no hay usuario autenticado
-      let finalUserId = userId;
-      
-      if (!userId && sessionId) {
-        console.log('👤 Creating temporary user for session:', sessionId);
-        
-        // Crear username único basado en sessionId
-        const tempUsername = `temp_${sessionId}`;
-        const tempEmail = `${tempUsername}@temp.local`;
-        
-        try {
-          // NUEVO: Verificar primero si ya existe el usuario temporal
-          const checkUserResult = await client.query(`
-            SELECT id FROM users WHERE username = $1
-          `, [tempUsername]);
-          
-          if (checkUserResult.rows.length > 0) {
-            // Usuario temporal ya existe
-            finalUserId = checkUserResult.rows[0].id;
-            console.log('✅ Using existing temporary user with ID:', finalUserId);
-          } else {
-            // Crear nuevo usuario temporal
-            const createTempUserResult = await client.query(`
-              INSERT INTO users (username, email, first_name, last_name, is_active, password_hash)
-              VALUES ($1, $2, 'Temp', 'User', true, 'temp_password')
-              RETURNING id
-            `, [tempUsername, tempEmail]);
-            
-            finalUserId = createTempUserResult.rows[0].id;
-            console.log('✅ Created new temporary user with ID:', finalUserId);
-          }
-          
-        } catch (userError) {
-          console.error('❌ Error managing temporary user:', userError);
-          
-          if (userError.code === '23505') { // Unique violation - intentar obtener existente
-            try {
-              const getTempUserResult = await client.query(`
-                SELECT id FROM users WHERE username = $1
-              `, [tempUsername]);
-              
-              if (getTempUserResult.rows.length > 0) {
-                finalUserId = getTempUserResult.rows[0].id;
-                console.log('✅ Recovered existing temporary user with ID:', finalUserId);
-              } else {
-                throw new Error('Could not create or find temporary user');
-              }
-            } catch (recoveryError) {
-              throw new Error(`Failed to create temporary user: ${recoveryError.message}`);
-            }
-          } else {
-            throw new Error(`Error creating temporary user: ${userError.message}`);
-          }
-        }
-      }
-
-      // Verificar que tenemos un userId válido
-      if (!finalUserId) {
-        throw new Error('No valid user ID available for exam creation');
-      }
-
-      console.log('📊 Using user ID for exam:', finalUserId);
-
-      // INICIAR TRANSACCIÓN AQUÍ (después de manejar el usuario)
-      await client.query('BEGIN');
-      transactionStarted = true;
-      
-      let certification;
-
-      // Obtener información de la certificación
-      if (typeof examConfig.provider === 'number' && typeof examConfig.certification === 'number') {
-        console.log('📊 Looking up certification by IDs:', { 
-          provider: examConfig.provider, 
-          certification: examConfig.certification 
-        });
-        
-        const certQuery = `
-          SELECT 
-            c.id, c.name, c.code, c.description, c.duration_minutes, 
-            c.passing_score, c.total_questions,
-            p.name as provider_name, p.description as provider_description
-          FROM certifications c
-          JOIN providers p ON c.provider_id = p.id
-          WHERE p.id = $1 AND c.id = $2 AND c.is_active = true
-        `;
-        const certResult = await client.query(certQuery, [examConfig.provider, examConfig.certification]);
-        
-        if (certResult.rows.length === 0) {
-          throw new Error(`No certification found for provider ID: ${examConfig.provider}, certification ID: ${examConfig.certification}`);
-        }
-        
-        certification = certResult.rows[0];
-        console.log('✅ Found certification:', certification.name);
-      } else {
-        throw new Error('Provider and certification must be numeric IDs');
-      }
-
-      // Configuraciones del examen
-      const examTitle = `${certification.provider_name} ${certification.name} - ${examConfig.mode === 'practice' ? 'Práctica' : 'Examen Real'}`;
-      const finalQuestionCount = certification.total_questions || 2;
-      const finalTimeLimit = examConfig.timeLimit || certification.duration_minutes || 120;
-
-      // Obtener preguntas aleatorias ANTES de insertar el examen
-      console.log('🔍 Fetching questions with filters:', {
-        provider: examConfig.provider,
-        certification: examConfig.certification,
-        count: finalQuestionCount
-      });
-
-      const questions = await QuestionService.getRandomQuestions(
-        finalQuestionCount,
-        {
-          provider: examConfig.provider,
-          certification: examConfig.certification,
-          category: examConfig.category,
-          difficulty: examConfig.difficulty
-        }
-      );
-
-      if (questions.length === 0) {
-        throw new Error(`No questions found matching the criteria for provider ID ${examConfig.provider}, certification ID ${examConfig.certification}`);
-      }
-
-      console.log(`✅ Found ${questions.length} questions for exam`);
-
-      // 💾 CREAR EXAMEN EN BASE DE DATOS
-      console.log('📝 Inserting exam into database...');
-      
-      const insertExamQuery = `
-        INSERT INTO exams (
-          user_id, session_id, certification_id, exam_mode, status,
-          total_questions, time_limit_minutes, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        RETURNING *
-      `;
-
-      const examValues = [
-        finalUserId,
-        sessionId,
-        certification.id,
-        examConfig.mode || 'practice',
-        'pending',
-        questions.length,
-        finalTimeLimit
-      ];
-
-      console.log('📤 Exam values:', {
-        userId: finalUserId,
-        sessionId: sessionId,
-        certificationId: certification.id,
-        mode: examConfig.mode || 'practice',
-        status: 'pending',
-        questionCount: questions.length,
-        timeLimit: finalTimeLimit
-      });
-
-      const examResult = await client.query(insertExamQuery, examValues);
-      const examRow = examResult.rows[0];
-      const examId = examRow.id;
-
-      console.log('✅ Exam created with ID:', examId);
-
-      // Insertar las preguntas del examen
-      console.log('📝 Inserting exam questions...');
-      
-      const insertQuestionsQuery = `
-        INSERT INTO exam_questions (exam_id, question_id, question_order)
-        VALUES ($1, $2, $3)
-      `;
-
-      // Randomizar preguntas si está configurado
-      const orderedQuestions = examConfig.settings?.randomizeQuestions ? 
-        questions.sort(() => 0.5 - Math.random()) : questions;
-
-      for (let i = 0; i < orderedQuestions.length; i++) {
-        await client.query(insertQuestionsQuery, [
-          examId,
-          orderedQuestions[i].id,
-          i + 1
-        ]);
-      }
-
-      console.log(`✅ Inserted ${orderedQuestions.length} questions`);
-
-      // COMMIT TRANSACCIÓN
-      await client.query('COMMIT');
-      transactionStarted = false;
-      console.log('✅ Transaction committed successfully');
-
-      // 🎯 CREAR OBJETO EXAM
-      const exam = new Exam({
-        id: examId,
-        userId: userId, // Mantener el userId original (null para anónimos)
-        sessionId: sessionId,
-        title: examTitle,
-        provider: certification.provider_name,
-        certification: certification.code,
-        questions: orderedQuestions,
-        timeLimit: finalTimeLimit,
-        passingScore: certification.passing_score || 70,
-        status: 'not_started',
-        createdAt: examRow.created_at,
-        updatedAt: examRow.updated_at,
-        settings: {
-          showExplanations: examConfig.mode === 'practice',
-          randomizeQuestions: examConfig.settings?.randomizeQuestions !== false,
-          randomizeAnswers: examConfig.settings?.randomizeAnswers === true,
-          allowPause: examConfig.mode === 'practice',
-          allowReview: examConfig.mode === 'practice',
-          ...examConfig.settings
-        }
-      });
-
-      logger.info('Exam created successfully:', {
-        id: examId,
-        title: examTitle,
-        originalUserId: userId,
-        finalUserId: finalUserId,
-        sessionId: sessionId,
-        questionCount: exam.questions.length,
-        isTemporaryUser: !userId
-      });
-
-      return exam;
-      
+      // Return the full exam (questions sanitized — no correct answers).
+      return await this.getExamById(examRow.id, userId, sessionId);
     } catch (error) {
-      // MANEJO DE ERRORES MEJORADO
-      console.error('❌ Error in createExam:', error);
-      
-      // Solo hacer rollback si la transacción fue iniciada
-      if (transactionStarted) {
-        try {
-          console.log('🔄 Rolling back transaction...');
-          await client.query('ROLLBACK');
-          console.log('✅ Transaction rolled back successfully');
-        } catch (rollbackError) {
-          console.error('❌ Error during rollback:', rollbackError);
-        }
+      try {
+        await client.query('ROLLBACK');
+      } catch (_) {
+        /* not in a transaction */
       }
-      
       logger.error('Error creating exam:', error);
       throw error;
     } finally {
@@ -285,199 +177,244 @@ class ExamService {
     }
   }
 
-  async getExamForReview(examId, userId = null, sessionId = null) {
+  async createFailedQuestionsExam(examConfig, userId = null, sessionId = null) {
+    if (!userId) {
+      throw new Error('Authentication required for failed questions exam');
+    }
+    const certificationId = parseInt(examConfig.certification, 10);
+    if (Number.isNaN(certificationId)) {
+      throw new Error('Certification must be a numeric ID');
+    }
+
+    const client = await this.pool.connect();
     try {
-      const exam = await this.getExamById(examId, userId, sessionId);
-      
-      if (!exam) {
-        return null;
+      const limit = Math.min(parseInt(examConfig.questionCount, 10) || 20, 50);
+
+      // Questions this user previously got wrong for this certification.
+      const failedResult = await client.query(
+        `SELECT DISTINCT q.id
+         FROM exam_answers ea
+         JOIN exams e       ON ea.exam_id = e.id
+         JOIN questions q   ON ea.question_id = q.id
+         JOIN topics t      ON q.topic_id = t.id
+         JOIN certifications c ON t.certification_id = c.id
+         WHERE e.user_id = $1
+           AND c.id = $2
+           AND ea.is_correct = false
+           AND q.is_active = true
+           AND q.review_status = 'approved'
+         ORDER BY RANDOM()
+         LIMIT $3`,
+        [userId, certificationId, limit]
+      );
+
+      if (failedResult.rows.length < 5) {
+        const err = new Error(
+          `Not enough failed questions found. Minimum 5 required, found ${failedResult.rows.length}`
+        );
+        err.code = 'NOT_ENOUGH_FAILED';
+        throw err;
+      }
+      const questionIds = failedResult.rows.map((r) => r.id);
+
+      const certResult = await client.query(
+        `SELECT c.id, c.name, c.code,
+                COALESCE(c.passing_score, 70) AS passing_score,
+                p.name AS provider_name
+         FROM certifications c
+         JOIN providers p ON c.provider_id = p.id
+         WHERE c.id = $1`,
+        [certificationId]
+      );
+      if (certResult.rows.length === 0) {
+        throw new Error('Certification not found');
+      }
+      const cert = certResult.rows[0];
+
+      const timeLimit = Math.max(Math.ceil(questionIds.length * 1.5), 10);
+      const title = `${cert.provider_name} - ${cert.name} (Failed questions)`;
+      const settings = {
+        showExplanations: true,
+        randomizeQuestions: true,
+        randomizeAnswers: false,
+        allowPause: true,
+        allowReview: true,
+        isFailedQuestionsExam: true,
+      };
+
+      await client.query('BEGIN');
+
+      const examInsert = await client.query(
+        `INSERT INTO exams (
+           user_id, session_id, certification_id, title, mode, question_count,
+           time_limit, passing_score, status, settings, created_at, updated_at
+         ) VALUES ($1, $2, $3, $4, 'practice'::"ExamMode", $5, $6, $7, 'pending', $8::jsonb, NOW(), NOW())
+         RETURNING *`,
+        [
+          userId,
+          sessionId,
+          cert.id,
+          title,
+          questionIds.length,
+          timeLimit,
+          cert.passing_score,
+          JSON.stringify(settings),
+        ]
+      );
+      const examRow = examInsert.rows[0];
+
+      for (let i = 0; i < questionIds.length; i++) {
+        await client.query(
+          `INSERT INTO exam_answers (exam_id, question_id, order_index, created_at)
+           VALUES ($1, $2, $3, NOW())
+           ON CONFLICT (exam_id, question_id) DO NOTHING`,
+          [examRow.id, questionIds[i], i + 1]
+        );
       }
 
-      // Verificar que el examen esté completado
-      if (exam.status !== 'completed') {
-        throw new Error('Only completed exams can be reviewed');
-      }
+      await client.query('COMMIT');
 
-      // Para revisión, asegurar que todas las preguntas tengan respuestas correctas
-      const client = await this.pool.connect();
-      
-      try {
-        // Obtener respuestas correctas para todas las preguntas del examen
-        const correctAnswersQuery = `
-          SELECT 
-            q.id as question_id,
-            array_agg(qo.order_index - 1 ORDER BY qo.order_index) as correct_indices
-          FROM exam_questions eq
-          JOIN questions q ON eq.question_id = q.id
-          JOIN question_options qo ON q.id = qo.question_id
-          WHERE eq.exam_id = $1 AND qo.is_correct = true
-          GROUP BY q.id
-        `;
-        
-        const correctAnswersResult = await client.query(correctAnswersQuery, [examId]);
-        const correctAnswersMap = {};
-        
-        correctAnswersResult.rows.forEach(row => {
-          correctAnswersMap[row.question_id] = row.correct_indices;
-        });
-
-        // Actualizar las preguntas del examen con respuestas correctas
-        exam.questions = exam.questions.map(question => ({
-          ...question,
-          correctAnswers: correctAnswersMap[question.id] || []
-        }));
-
-        return exam;
-        
-      } finally {
-        client.release();
-      }
-      
+      return await this.getExamById(examRow.id, userId, sessionId);
     } catch (error) {
-      logger.error('Error getting exam for review:', error);
+      try {
+        await client.query('ROLLBACK');
+      } catch (_) {
+        /* noop */
+      }
+      logger.error('Error creating failed questions exam:', error);
       throw error;
+    } finally {
+      client.release();
     }
   }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Reads
+  // ──────────────────────────────────────────────────────────────────────────
 
   async getExamById(id, userId = null, sessionId = null) {
     const client = await this.pool.connect();
     try {
-      logger.debug('Looking for exam:', { id, userId, sessionId });
-
-      // Consulta para obtener el examen con información de certificación
-      const examQuery = `
-        SELECT 
-          e.*,
-          c.name as certification_name,
-          c.code as certification_code,
-          c.passing_score,
-          p.name as provider_name
-        FROM exams e
-        JOIN certifications c ON e.certification_id = c.id
-        JOIN providers p ON c.provider_id = p.id
-        WHERE e.id = $1
-          AND (
-            ($2::INTEGER IS NOT NULL AND e.user_id = $2) OR
-            ($3::TEXT IS NOT NULL AND e.session_id = $3)
-          )
-      `;
-
-      const examResult = await client.query(examQuery, [id, userId, sessionId]);
+      const examResult = await client.query(
+        `SELECT e.*,
+                c.name AS certification_name,
+                c.code AS certification_code,
+                COALESCE(c.passing_score, 70) AS cert_passing_score,
+                p.name AS provider_name
+         FROM exams e
+         JOIN certifications c ON e.certification_id = c.id
+         JOIN providers p ON c.provider_id = p.id
+         WHERE e.id = $1
+           AND (
+             ($2::INTEGER IS NOT NULL AND e.user_id = $2) OR
+             ($3::TEXT    IS NOT NULL AND e.session_id = $3)
+           )`,
+        [id, userId, sessionId]
+      );
 
       if (examResult.rows.length === 0) {
         logger.warn('Exam not found:', { id, userId, sessionId });
         return null;
       }
-
       const examRow = examResult.rows[0];
 
-      // Obtener las preguntas del examen con sus opciones
-      const questionsQuery = `
-        SELECT 
-          q.*,
-          eq.question_order,
-          eq.is_answered,
-          eq.is_correct,
-          eq.time_spent_seconds,
-          qt.name as question_type,
-          t.name as topic_name
-        FROM exam_questions eq
-        JOIN questions q ON eq.question_id = q.id
-        JOIN question_types qt ON q.question_type_id = qt.id
-        JOIN topics t ON q.topic_id = t.id
-        WHERE eq.exam_id = $1
-        ORDER BY eq.question_order
-      `;
+      // Questions for this exam (joined via exam_answers), with options and
+      // the user's stored answer.
+      const questionsResult = await client.query(
+        `SELECT
+           q.id,
+           q.question_text,
+           q.explanation,
+           q.difficulty,
+           q.points,
+           t.name AS topic_name,
+           qt.name AS question_type,
+           ea.order_index,
+           ea.user_answer,
+           ea.is_correct,
+           ea.flagged,
+           COALESCE(
+             json_agg(
+               json_build_object(
+                 'label', qo.option_label,
+                 'text', qo.option_text,
+                 'order_index', qo.order_index
+               ) ORDER BY qo.order_index
+             ) FILTER (WHERE qo.id IS NOT NULL),
+             '[]'::json
+           ) AS options,
+           COALESCE(
+             array_agg(qo.order_index ORDER BY qo.order_index) FILTER (WHERE qo.is_correct = true),
+             ARRAY[]::integer[]
+           ) AS correct_order
+         FROM exam_answers ea
+         JOIN questions q       ON ea.question_id = q.id
+         JOIN topics t          ON q.topic_id = t.id
+         JOIN question_types qt ON q.question_type_id = qt.id
+         LEFT JOIN question_options qo ON q.id = qo.question_id
+         WHERE ea.exam_id = $1
+         GROUP BY q.id, q.question_text, q.explanation, q.difficulty, q.points,
+                  t.name, qt.name, ea.order_index, ea.user_answer, ea.is_correct, ea.flagged
+         ORDER BY ea.order_index`,
+        [id]
+      );
 
-      const questionsResult = await client.query(questionsQuery, [id]);
-
-      // Obtener opciones para cada pregunta
       const questions = [];
-      for (const questionRow of questionsResult.rows) {
-        const optionsQuery = `
-          SELECT id, option_label, option_text, is_correct, order_index
-          FROM question_options
-          WHERE question_id = $1
-          ORDER BY order_index
-        `;
-
-        const optionsResult = await client.query(optionsQuery, [questionRow.id]);
-
-        questions.push({
-          id: questionRow.id,
-          text: questionRow.question_text,
-          explanation: questionRow.explanation,
-          difficulty: questionRow.difficulty_level,
-          category: questionRow.topic_name,
-          provider: examRow.provider_name,
-          questionType: questionRow.question_type,
-          isMultipleChoice: questionRow.question_type === 'multiple_answer',
-          expectedAnswers: questionRow.expected_answers_count,
-          options: optionsResult.rows.map(opt => ({
-            label: opt.option_label,
-            text: opt.option_text
-          })),
-          correctAnswers: optionsResult.rows
-            .filter(opt => opt.is_correct)
-            .map((opt, index) => index),
-          order: questionRow.question_order,
-          isAnswered: questionRow.is_answered,
-          isCorrect: questionRow.is_correct,
-          timeSpent: questionRow.time_spent_seconds
-        });
-      }
-
-      // Obtener respuestas del usuario
-      const answersQuery = `
-        SELECT 
-          eq.question_id,
-          array_agg(qo.order_index ORDER BY ua.id) as selected_options
-        FROM exam_questions eq
-        LEFT JOIN user_answers ua ON eq.id = ua.exam_question_id
-        LEFT JOIN question_options qo ON ua.question_option_id = qo.id
-        WHERE eq.exam_id = $1
-        GROUP BY eq.question_id
-      `;
-
-      const answersResult = await client.query(answersQuery, [id]);
       const answers = {};
 
-      answersResult.rows.forEach(row => {
-        if (row.selected_options && row.selected_options[0] !== null) {
-          const questionData = questions.find(q => q.id === row.question_id);
-          if (questionData && questionData.isMultipleChoice) {
-            answers[row.question_id] = row.selected_options;
-          } else {
-            answers[row.question_id] = row.selected_options[0];
-          }
-        }
-      });
+      for (const row of questionsResult.rows) {
+        const isMultipleChoice = row.question_type === 'multiple_choice';
+        const correctAnswers = (row.correct_order || []).map((idx) => idx - 1);
 
-      // Crear objeto Exam
+        questions.push({
+          id: row.id,
+          text: row.question_text,
+          explanation: row.explanation,
+          difficulty: row.difficulty,
+          category: row.topic_name,
+          provider: examRow.provider_name,
+          questionType: row.question_type,
+          isMultipleChoice,
+          points: parseFloat(row.points) || 1,
+          options: row.options || [],
+          correctAnswers,
+          order: row.order_index,
+          isAnswered: row.user_answer !== null && row.user_answer !== undefined,
+          isCorrect: row.is_correct,
+          flagged: row.flagged,
+        });
+
+        // user_answer is stored as a JSONB array of 0-based indices.
+        if (row.user_answer !== null && row.user_answer !== undefined) {
+          const arr = Array.isArray(row.user_answer) ? row.user_answer : [row.user_answer];
+          answers[row.id] = isMultipleChoice ? arr : arr[0];
+        }
+      }
+
       const exam = new Exam({
         id: examRow.id,
         userId: examRow.user_id,
         sessionId: examRow.session_id,
-        title: `${examRow.provider_name} ${examRow.certification_name} Exam`,
+        title: examRow.title,
         provider: examRow.provider_name,
         certification: examRow.certification_code,
-        questions: questions,
-        answers: answers,
-        timeLimit: examRow.time_limit_minutes,
-        timeSpent: examRow.time_spent_minutes,
-        status: this.mapStatusToClientFormat(examRow.status),
-        score: examRow.percentage_score,
-        passed: examRow.passing_status === 'passed',
-        passingScore: examRow.passing_score,
+        certificationId: examRow.certification_id,
+        mode: examRow.mode,
+        questions,
+        answers,
+        timeLimit: examRow.time_limit,
+        status: examRow.status,
+        score: examRow.score != null ? parseFloat(examRow.score) : 0,
+        passed: examRow.passed === true,
+        passingScore: parseFloat(examRow.passing_score) || parseFloat(examRow.cert_passing_score) || 70,
         startedAt: examRow.started_at,
         completedAt: examRow.completed_at,
         createdAt: examRow.created_at,
-        updatedAt: examRow.updated_at
+        updatedAt: examRow.updated_at,
+        settings: examRow.settings || {},
       });
 
-      logger.debug('Found exam:', { id, status: exam.status });
       return exam;
-
     } catch (error) {
       logger.error('Error getting exam by id:', error);
       return null;
@@ -486,183 +423,116 @@ class ExamService {
     }
   }
 
-  async getUserExams(userId, filters = {}) {
+  async getExamForReview(examId, userId = null, sessionId = null) {
+    const exam = await this.getExamById(examId, userId, sessionId);
+    if (!exam) return null;
+    if (exam.status !== 'completed') {
+      throw new Error('Only completed exams can be reviewed');
+    }
+    // correctAnswers are already loaded by getExamById.
+    return exam;
+  }
+
+  async _listExams(whereCol, whereVal, filters = {}) {
     const client = await this.pool.connect();
     try {
-      let whereConditions = ['e.user_id = $1'];
-      let queryParams = [userId];
-      let paramIndex = 2;
+      const whereConditions = [`e.${whereCol} = $1`];
+      const params = [whereVal];
+      let idx = 2;
 
-      // Apply filters
       if (filters.status) {
-        whereConditions.push(`e.status = $${paramIndex}`);
-        queryParams.push(this.mapStatusToDbFormat(filters.status));
-        paramIndex++;
+        whereConditions.push(`e.status = $${idx}::"ExamStatus"`);
+        params.push(filters.status);
+        idx++;
       }
-
       if (filters.provider) {
-        whereConditions.push(`p.name = $${paramIndex}`);
-        queryParams.push(filters.provider);
-        paramIndex++;
+        whereConditions.push(`p.name = $${idx}`);
+        params.push(filters.provider);
+        idx++;
       }
 
-      const query = `
-        SELECT 
-          e.*,
-          c.name as certification_name,
-          c.code as certification_code,
-          p.name as provider_name
-        FROM exams e
-        JOIN certifications c ON e.certification_id = c.id
-        JOIN providers p ON c.provider_id = p.id
-        WHERE ${whereConditions.join(' AND ')}
-        ORDER BY e.created_at DESC
-      `;
+      const result = await client.query(
+        `SELECT e.*,
+                c.name AS certification_name,
+                c.code AS certification_code,
+                p.name AS provider_name
+         FROM exams e
+         JOIN certifications c ON e.certification_id = c.id
+         JOIN providers p ON c.provider_id = p.id
+         WHERE ${whereConditions.join(' AND ')}
+         ORDER BY e.created_at DESC`,
+        params
+      );
 
-      const result = await client.query(query, queryParams);
-      
-      const exams = result.rows.map(row => new Exam({
-        id: row.id,
-        userId: row.user_id,
-        title: `${row.provider_name} ${row.certification_name} Exam`,
-        provider: row.provider_name,
-        certification: row.certification_code,
-        timeLimit: row.time_limit_minutes,
-        timeSpent: row.time_spent_minutes,
-        status: this.mapStatusToClientFormat(row.status),
-        score: row.percentage_score,
-        passed: row.passing_status === 'passed',
-        startedAt: row.started_at,
-        completedAt: row.completed_at,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-        questions: [], // Summary view doesn't need full questions
-        answers: {}
-      }));
-
-      return exams;
+      return result.rows.map(
+        (row) =>
+          new Exam({
+            id: row.id,
+            userId: row.user_id,
+            sessionId: row.session_id,
+            title: row.title,
+            provider: row.provider_name,
+            certification: row.certification_code,
+            certificationId: row.certification_id,
+            mode: row.mode,
+            timeLimit: row.time_limit,
+            status: row.status,
+            score: row.score != null ? parseFloat(row.score) : 0,
+            passed: row.passed === true,
+            passingScore: parseFloat(row.passing_score) || 70,
+            totalQuestions: row.question_count,
+            startedAt: row.started_at,
+            completedAt: row.completed_at,
+            createdAt: row.created_at,
+            updatedAt: row.updated_at,
+            questions: [],
+            answers: {},
+          })
+      );
     } catch (error) {
-      logger.error('Error getting user exams:', error);
+      logger.error('Error listing exams:', error);
       return [];
     } finally {
       client.release();
     }
+  }
+
+  async getUserExams(userId, filters = {}) {
+    return this._listExams('user_id', userId, filters);
   }
 
   async getSessionExams(sessionId, filters = {}) {
-    const client = await this.pool.connect();
-    try {
-      let whereConditions = ['e.session_id = $1'];
-      let queryParams = [sessionId];
-      let paramIndex = 2;
-
-      // Apply filters
-      if (filters.status) {
-        whereConditions.push(`e.status = $${paramIndex}`);
-        queryParams.push(this.mapStatusToDbFormat(filters.status));
-        paramIndex++;
-      }
-
-      if (filters.provider) {
-        whereConditions.push(`p.name = $${paramIndex}`);
-        queryParams.push(filters.provider);
-        paramIndex++;
-      }
-
-      const query = `
-        SELECT 
-          e.*,
-          c.name as certification_name,
-          c.code as certification_code,
-          p.name as provider_name
-        FROM exams e
-        JOIN certifications c ON e.certification_id = c.id
-        JOIN providers p ON c.provider_id = p.id
-        WHERE ${whereConditions.join(' AND ')}
-        ORDER BY e.created_at DESC
-      `;
-
-      const result = await client.query(query, queryParams);
-      
-      const exams = result.rows.map(row => new Exam({
-        id: row.id,
-        sessionId: row.session_id,
-        title: `${row.provider_name} ${row.certification_name} Exam`,
-        provider: row.provider_name,
-        certification: row.certification_code,
-        timeLimit: row.time_limit_minutes,
-        timeSpent: row.time_spent_minutes,
-        status: this.mapStatusToClientFormat(row.status),
-        score: row.percentage_score,
-        passed: row.passing_status === 'passed',
-        startedAt: row.started_at,
-        completedAt: row.completed_at,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-        questions: [], // Summary view doesn't need full questions
-        answers: {}
-      }));
-
-      return exams;
-    } catch (error) {
-      logger.error('Error getting session exams:', error);
-      return [];
-    } finally {
-      client.release();
-    }
+    return this._listExams('session_id', sessionId, filters);
   }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Lifecycle
+  // ──────────────────────────────────────────────────────────────────────────
 
   async startExam(examId, userId = null, sessionId = null) {
     const client = await this.pool.connect();
     try {
-      await client.query('BEGIN');
-
-      logger.info('Attempting to start exam:', { examId, userId, sessionId });
-
       const exam = await this.getExamById(examId, userId, sessionId);
-      
-      if (!exam) {
-        logger.error('Exam not found when starting:', { examId, userId, sessionId });
-        throw new Error('Exam not found');
-      }
-
-      // Verificar autorización
+      if (!exam) throw new Error('Exam not found');
       if (!exam.belongsTo(userId, sessionId)) {
-        logger.error('Unauthorized access attempt:', { examId, userId, sessionId });
         throw new Error('Unauthorized to access this exam');
       }
-
-      if (exam.status !== 'not_started') {
-        logger.warn('Attempt to start exam that is not in not_started status:', {
-          examId,
-          currentStatus: exam.status
-        });
-        throw new Error(`Exam already started or completed (status: ${exam.status})`);
+      // Allow (re)entering an exam that is pending or already active.
+      if (!['not_started', 'in_progress'].includes(exam.status)) {
+        throw new Error(`Exam already ${exam.status}`);
       }
 
-      // Actualizar estado del examen
-      const updateQuery = `
-        UPDATE exams 
-        SET status = 'active', started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-        WHERE id = $1
-      `;
+      await client.query(
+        `UPDATE exams
+         SET status = 'active',
+             started_at = COALESCE(started_at, NOW()),
+             updated_at = NOW()
+         WHERE id = $1`,
+        [examId]
+      );
 
-      await client.query(updateQuery, [examId]);
-      await client.query('COMMIT');
-
-      // Obtener el examen actualizado
-      const updatedExam = await this.getExamById(examId, userId, sessionId);
-      
-      logger.info('Exam started successfully:', {
-        examId,
-        userId,
-        sessionId,
-        startedAt: updatedExam.startedAt
-      });
-
-      return updatedExam;
+      return await this.getExamById(examId, userId, sessionId);
     } catch (error) {
-      await client.query('ROLLBACK');
       logger.error('Error starting exam:', error);
       throw error;
     } finally {
@@ -675,97 +545,89 @@ class ExamService {
     try {
       await client.query('BEGIN');
 
-      const exam = await this.getExamById(examId, userId, sessionId);
-      
-      if (!exam) {
+      // Ownership check (cheap, avoids loading the whole exam).
+      const owner = await client.query(
+        `SELECT id FROM exams
+         WHERE id = $1
+           AND (($2::INTEGER IS NOT NULL AND user_id = $2) OR
+                ($3::TEXT    IS NOT NULL AND session_id = $3))`,
+        [examId, userId, sessionId]
+      );
+      if (owner.rows.length === 0) {
         throw new Error('Exam not found');
       }
 
-      // Verificar autorización
-      if (!exam.belongsTo(userId, sessionId)) {
-        throw new Error('Unauthorized to access this exam');
-      }
-
-      if (exam.status !== 'in_progress') {
-        throw new Error('Exam is not in progress');
-      }
-
-      // Obtener exam_question_id
-      const examQuestionQuery = `
-        SELECT id FROM exam_questions 
-        WHERE exam_id = $1 AND question_id = $2
-      `;
-      const examQuestionResult = await client.query(examQuestionQuery, [examId, questionId]);
-      
-      if (examQuestionResult.rows.length === 0) {
+      // Ensure the question is part of this exam.
+      const ea = await client.query(
+        `SELECT id FROM exam_answers WHERE exam_id = $1 AND question_id = $2`,
+        [examId, questionId]
+      );
+      if (ea.rows.length === 0) {
         throw new Error('Question not found in exam');
       }
 
-      const examQuestionId = examQuestionResult.rows[0].id;
+      const answerArr = Array.isArray(answer) ? answer : [answer];
+      const correctIndices = await this._getCorrectIndices(client, questionId);
+      const isCorrect = this._isAnswerCorrect(answerArr, correctIndices);
 
-      // Eliminar respuestas anteriores para esta pregunta
-      const deleteAnswersQuery = `
-        DELETE FROM user_answers WHERE exam_question_id = $1
-      `;
-      await client.query(deleteAnswersQuery, [examQuestionId]);
+      await client.query(
+        `UPDATE exam_answers
+         SET user_answer = $3::jsonb, is_correct = $4, answered_at = NOW()
+         WHERE exam_id = $1 AND question_id = $2`,
+        [examId, questionId, JSON.stringify(answerArr), isCorrect]
+      );
 
-      // Obtener opciones de la pregunta
-      const optionsQuery = `
-        SELECT id, order_index, is_correct 
-        FROM question_options 
-        WHERE question_id = $1 
-        ORDER BY order_index
-      `;
-      const optionsResult = await client.query(optionsQuery, [questionId]);
-      const options = optionsResult.rows;
-
-      // Insertar nuevas respuestas
-      const answers = Array.isArray(answer) ? answer : [answer];
-      let isCorrect = true;
-      
-      for (const answerIndex of answers) {
-        const option = options[answerIndex];
-        if (!option) {
-          throw new Error(`Invalid answer index: ${answerIndex}`);
-        }
-
-        const insertAnswerQuery = `
-          INSERT INTO user_answers (exam_question_id, question_option_id, is_correct)
-          VALUES ($1, $2, $3)
-        `;
-        await client.query(insertAnswerQuery, [examQuestionId, option.id, option.is_correct]);
-        
-        if (!option.is_correct) {
-          isCorrect = false;
-        }
-      }
-
-      // Verificar si es una respuesta múltiple correcta completa
-      if (Array.isArray(answer)) {
-        const correctOptions = options.filter(opt => opt.is_correct);
-        isCorrect = answers.length === correctOptions.length && 
-                   answers.every(idx => options[idx].is_correct);
-      }
-
-      // Actualizar exam_questions
-      const updateExamQuestionQuery = `
-        UPDATE exam_questions 
-        SET is_answered = true, is_correct = $1, answered_at = CURRENT_TIMESTAMP
-        WHERE id = $2
-      `;
-      await client.query(updateExamQuestionQuery, [isCorrect, examQuestionId]);
-
-      // Actualizar timestamp del examen
-      const updateExamQuery = `
-        UPDATE exams SET updated_at = CURRENT_TIMESTAMP WHERE id = $1
-      `;
-      await client.query(updateExamQuery, [examId]);
-
+      await client.query(`UPDATE exams SET updated_at = NOW() WHERE id = $1`, [examId]);
       await client.query('COMMIT');
-      return { success: true };
+
+      return { success: true, isCorrect };
     } catch (error) {
-      await client.query('ROLLBACK');
+      try {
+        await client.query('ROLLBACK');
+      } catch (_) {
+        /* noop */
+      }
       logger.error('Error submitting answer:', error);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  // Validate an answer WITHOUT persisting (practice "check" button).
+  async validateAnswerForExam(examId, questionId, answer, userId = null, sessionId = null) {
+    const client = await this.pool.connect();
+    try {
+      const owner = await client.query(
+        `SELECT e.id, COALESCE(ea.id IS NOT NULL, false) AS in_exam
+         FROM exams e
+         LEFT JOIN exam_answers ea ON ea.exam_id = e.id AND ea.question_id = $4
+         WHERE e.id = $1
+           AND (($2::INTEGER IS NOT NULL AND e.user_id = $2) OR
+                ($3::TEXT    IS NOT NULL AND e.session_id = $3))`,
+        [examId, userId, sessionId, questionId]
+      );
+      if (owner.rows.length === 0) {
+        throw new Error('Exam not found');
+      }
+
+      const answerArr = Array.isArray(answer) ? answer : [answer];
+      const correctIndices = await this._getCorrectIndices(client, questionId);
+      const isCorrect = this._isAnswerCorrect(answerArr, correctIndices);
+
+      const explanationRes = await client.query(
+        `SELECT explanation FROM questions WHERE id = $1`,
+        [questionId]
+      );
+
+      return {
+        questionId,
+        isCorrect,
+        correctAnswers: correctIndices,
+        explanation: explanationRes.rows[0]?.explanation || null,
+      };
+    } catch (error) {
+      logger.error('Error validating answer:', error);
       throw error;
     } finally {
       client.release();
@@ -777,115 +639,63 @@ class ExamService {
     try {
       await client.query('BEGIN');
 
-      const exam = await this.getExamById(examId, userId, sessionId);
-      
-      if (!exam) {
+      const examRes = await client.query(
+        `SELECT e.id, e.user_id, COALESCE(e.passing_score, c.passing_score, 70) AS passing_score
+         FROM exams e
+         JOIN certifications c ON e.certification_id = c.id
+         WHERE e.id = $1
+           AND (($2::INTEGER IS NOT NULL AND e.user_id = $2) OR
+                ($3::TEXT    IS NOT NULL AND e.session_id = $3))`,
+        [examId, userId, sessionId]
+      );
+      if (examRes.rows.length === 0) {
         throw new Error('Exam not found');
       }
+      const passingScore = parseFloat(examRes.rows[0].passing_score) || 70;
 
-      // Verificar autorización
-      if (!exam.belongsTo(userId, sessionId)) {
-        throw new Error('Unauthorized to access this exam');
-      }
+      const stats = await client.query(
+        `SELECT
+           COUNT(*)::int AS total,
+           COUNT(*) FILTER (WHERE is_correct = true)::int AS correct
+         FROM exam_answers WHERE exam_id = $1`,
+        [examId]
+      );
+      const total = stats.rows[0].total || 0;
+      const correct = stats.rows[0].correct || 0;
+      const score = total > 0 ? Math.round((correct / total) * 100) : 0;
+      const passed = score >= passingScore;
 
-      if (exam.status !== 'in_progress') {
-        throw new Error('Exam is not in progress');
-      }
-
-      // Calcular estadísticas del examen
-      const statsQuery = `
-        SELECT 
-          COUNT(*) as total_questions,
-          COUNT(CASE WHEN eq.is_answered THEN 1 END) as answered_questions,
-          COUNT(CASE WHEN eq.is_correct THEN 1 END) as correct_answers,
-          SUM(eq.time_spent_seconds) as total_time_seconds
-        FROM exam_questions eq
-        WHERE eq.exam_id = $1
-      `;
-      const statsResult = await client.query(statsQuery, [examId]);
-      const stats = statsResult.rows[0];
-
-      const percentageScore = stats.total_questions > 0 ? 
-        (stats.correct_answers / stats.total_questions) * 100 : 0;
-
-      // Obtener passing score de la certificación
-      const passingScoreQuery = `
-        SELECT c.passing_score 
-        FROM exams e 
-        JOIN certifications c ON e.certification_id = c.id 
-        WHERE e.id = $1
-      `;
-      const passingScoreResult = await client.query(passingScoreQuery, [examId]);
-      const passingScore = passingScoreResult.rows[0]?.passing_score || 70;
-
-      const passed = percentageScore >= passingScore;
-      const timeSpentMinutes = Math.round((stats.total_time_seconds || 0) / 60);
-
-      // Actualizar el examen
-      const updateExamQuery = `
-        UPDATE exams 
-        SET 
-          status = 'completed',
-          completed_at = CURRENT_TIMESTAMP,
-          score = $2,
-          percentage_score = $3,
-          passing_status = $4,
-          correct_answers = $5,
-          incorrect_answers = $6,
-          time_spent_minutes = $7,
-          updated_at = CURRENT_TIMESTAMP
-        WHERE id = $1
-      `;
-
-      await client.query(updateExamQuery, [
-        examId,
-        percentageScore,
-        percentageScore,
-        passed ? 'passed' : 'failed',
-        stats.correct_answers,
-        stats.total_questions - stats.correct_answers,
-        timeSpentMinutes
-      ]);
+      await client.query(
+        `UPDATE exams
+         SET status = 'completed', completed_at = NOW(), score = $2,
+             passed = $3, updated_at = NOW()
+         WHERE id = $1`,
+        [examId, score, passed]
+      );
 
       await client.query('COMMIT');
 
-      // Actualizar estadísticas del usuario si está autenticado
+      // Best-effort stats update for authenticated users.
       if (userId) {
         try {
-          const results = {
-            score: percentageScore,
-            passed: passed,
-            totalQuestions: stats.total_questions,
-            correctAnswers: stats.correct_answers,
-            timeSpent: timeSpentMinutes
-          };
-          await UserService.updateUserStats(userId, results);
-
-          // Actualizar estadísticas de preguntas
-          const questionsQuery = `
-            SELECT q.id, eq.is_correct, $2 as time_spent
-            FROM exam_questions eq
-            JOIN questions q ON eq.question_id = q.id
-            WHERE eq.exam_id = $1 AND eq.is_answered = true
-          `;
-          const questionsResult = await client.query(questionsQuery, [examId, timeSpentMinutes]);
-
-          for (const questionRow of questionsResult.rows) {
-            await QuestionService.updateQuestionStats(
-              questionRow.id, 
-              questionRow.is_correct, 
-              questionRow.time_spent
-            );
-          }
-        } catch (error) {
-          logger.error('Error updating user stats:', error);
-          // No lanzar error, el examen ya está completado
+          await UserService.updateUserStats(userId, {
+            score,
+            passed,
+            totalQuestions: total,
+            correctAnswers: correct,
+          });
+        } catch (statErr) {
+          logger.error('Error updating user stats (non-fatal):', statErr);
         }
       }
 
       return await this.getExamById(examId, userId, sessionId);
     } catch (error) {
-      await client.query('ROLLBACK');
+      try {
+        await client.query('ROLLBACK');
+      } catch (_) {
+        /* noop */
+      }
       logger.error('Error completing exam:', error);
       throw error;
     } finally {
@@ -893,30 +703,30 @@ class ExamService {
     }
   }
 
+  async getExamResults(examId, userId = null, sessionId = null) {
+    const exam = await this.getExamById(examId, userId, sessionId);
+    if (!exam) throw new Error('Exam not found');
+    if (!exam.belongsTo(userId, sessionId)) {
+      throw new Error('Unauthorized to access this exam');
+    }
+    if (exam.status !== 'completed') {
+      throw new Error('Exam not completed yet');
+    }
+    return exam.getResults();
+  }
+
   async deleteExam(id, userId = null, sessionId = null) {
     const client = await this.pool.connect();
     try {
-      await client.query('BEGIN');
-
-      // Verificar que el examen existe y pertenece al usuario/sesión
       const exam = await this.getExamById(id, userId, sessionId);
-      
-      if (!exam) {
-        throw new Error('Exam not found');
-      }
-
+      if (!exam) throw new Error('Exam not found');
       if (!exam.belongsTo(userId, sessionId)) {
         throw new Error('Unauthorized to access this exam');
       }
-
-      // Eliminar el examen (las tablas relacionadas se eliminan por CASCADE)
-      const deleteQuery = `DELETE FROM exams WHERE id = $1`;
-      await client.query(deleteQuery, [id]);
-
-      await client.query('COMMIT');
-      logger.info('Exam deleted successfully:', { id, userId, sessionId });
+      // exam_answers rows cascade on delete.
+      await client.query(`DELETE FROM exams WHERE id = $1`, [id]);
+      logger.info('Exam deleted:', { id, userId, sessionId });
     } catch (error) {
-      await client.query('ROLLBACK');
       logger.error('Error deleting exam:', error);
       throw error;
     } finally {
@@ -924,55 +734,45 @@ class ExamService {
     }
   }
 
-  async getExamResults(examId, userId = null, sessionId = null) {
+  // ──────────────────────────────────────────────────────────────────────────
+  // Status transitions (pause / resume / cancel) + flag
+  // ──────────────────────────────────────────────────────────────────────────
+
+  async setExamStatus(examId, dbStatus, extraSets = '') {
+    const client = await this.pool.connect();
     try {
-      const exam = await this.getExamById(examId, userId, sessionId);
-      
-      if (!exam) {
-        throw new Error('Exam not found');
-      }
-
-      // Verificar autorización
-      if (!exam.belongsTo(userId, sessionId)) {
-        throw new Error('Unauthorized to access this exam');
-      }
-
-      if (exam.status !== 'completed') {
-        throw new Error('Exam not completed yet');
-      }
-
-      return exam.getResults();
-    } catch (error) {
-      logger.error('Error getting exam results:', error);
-      throw error;
+      await client.query(
+        `UPDATE exams
+         SET status = $2::"ExamStatus", updated_at = NOW()${extraSets ? ', ' + extraSets : ''}
+         WHERE id = $1`,
+        [examId, dbStatus]
+      );
+    } finally {
+      client.release();
     }
   }
 
-  // Métodos auxiliares para mapear estados
-  mapStatusToClientFormat(dbStatus) {
-    const statusMap = {
-      'pending': 'not_started',
-      'active': 'in_progress',
-      'paused': 'paused',
-      'completed': 'completed',
-      'cancelled': 'cancelled'
-    };
-    return statusMap[dbStatus] || dbStatus;
-  }
-
-  mapStatusToDbFormat(clientStatus) {
-    const statusMap = {
-      'not_started': 'pending',
-      'in_progress': 'active',
-      'paused': 'paused',
-      'completed': 'completed',
-      'cancelled': 'cancelled'
-    };
-    return statusMap[clientStatus] || clientStatus;
+  async toggleQuestionFlag(examId, questionId) {
+    const client = await this.pool.connect();
+    try {
+      const res = await client.query(
+        `UPDATE exam_answers
+         SET flagged = NOT COALESCE(flagged, false)
+         WHERE exam_id = $1 AND question_id = $2
+         RETURNING flagged`,
+        [examId, questionId]
+      );
+      if (res.rows.length === 0) {
+        throw new Error('Question not found in this exam');
+      }
+      return res.rows[0].flagged;
+    } finally {
+      client.release();
+    }
   }
 
   async close() {
-    await this.pool.end();
+    // Shared pool is closed by the app shutdown handler.
   }
 }
 
