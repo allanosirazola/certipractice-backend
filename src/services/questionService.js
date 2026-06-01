@@ -1,5 +1,6 @@
 // src/services/questionService.js - UPDATED FOR NEW POSTGRESQL SCHEMA
 const { Pool } = require('pg');
+const crypto = require('crypto');
 const Question = require('../models/Question');
 const logger = require('../utils/logger');
 
@@ -700,7 +701,7 @@ async getRandomQuestions(count, filters = {}) {
           COUNT(CASE WHEN qt.name = 'multiple_answer' THEN 1 END) as multiple_choice_questions,
           COUNT(CASE WHEN qt.name = 'multiple_choice' THEN 1 END) as single_choice_questions,
           COUNT(CASE WHEN qt.name = 'true_false' THEN 1 END) as true_false_questions,
-          AVG(q.expected_answers_count) as avg_expected_answers,
+          1 as avg_expected_answers,
           COUNT(CASE WHEN q.difficulty = 'easy' THEN 1 END) as easy_questions,
           COUNT(CASE WHEN q.difficulty = 'medium' THEN 1 END) as medium_questions,
           COUNT(CASE WHEN q.difficulty = 'hard' THEN 1 END) as hard_questions,
@@ -783,7 +784,7 @@ async getRandomQuestions(count, filters = {}) {
         FROM questions q
         LEFT JOIN question_options qo ON q.id = qo.question_id
         WHERE q.topic_id = $1 AND q.is_active = true AND q.review_status = 'approved'
-        GROUP BY q.id, q.question_text, q.difficulty, q.expected_answers_count
+        GROUP BY q.id, q.question_text, q.difficulty
         ORDER BY q.created_at
       `, [topicId]);
       client.release();
@@ -853,51 +854,60 @@ async getRandomQuestions(count, filters = {}) {
       }
       
       const questionTypeId = typeResult.rows[0].id;
-      
-      // Insert question
+
+      // content_hash is required + unique in the current schema. Derive it the
+      // same way the JSON importer does (sha256 of normalized text + options).
+      const normalizedText = String(questionData.text || '').trim().toLowerCase();
+      const optTexts = (questionData.options || [])
+        .map((o) => String(o.text || '').trim().toLowerCase())
+        .join('|');
+      const contentHash = crypto
+        .createHash('sha256')
+        .update(normalizedText + '||' + optTexts)
+        .digest('hex');
+
+      // Insert question (current schema: difficulty, points; no external_id /
+      // expected_answers_count columns).
       const questionResult = await client.query(`
         INSERT INTO questions (
-          external_id, topic_id, question_type_id, question_text, explanation,
-          difficulty_level, expected_answers_count, points, review_status
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          topic_id, question_type_id, question_text, explanation,
+          difficulty, points, content_hash, review_status
+        ) VALUES ($1, $2, $3, $4, $5::"Difficulty", $6, $7, 'pending')
         RETURNING id
       `, [
-        questionData.externalId,
         topicId,
         questionTypeId,
         questionData.text,
         questionData.explanation,
-        questionData.difficulty,
-        questionData.expectedAnswers,
-        questionData.points,
-        'pending'
+        (questionData.difficulty || 'medium').toLowerCase(),
+        questionData.points || 1,
+        contentHash,
       ]);
-      
+
       const questionId = questionResult.rows[0].id;
-      
+
       // Insert options
       if (questionData.options && questionData.options.length > 0) {
         for (let i = 0; i < questionData.options.length; i++) {
           const option = questionData.options[i];
           const isCorrect = questionData.correctAnswers.includes(i);
-          
+
           await client.query(`
             INSERT INTO question_options (
-              question_id, option_label, option_text, is_correct, order_index, explanation
-            ) VALUES ($1, $2, $3, $4, $5, $6)
+              question_id, option_label, option_text, is_correct, order_index
+            ) VALUES ($1, $2, $3, $4, $5)
           `, [
             questionId,
             option.label || String.fromCharCode(65 + i), // A, B, C, D...
             option.text,
             isCorrect,
             i + 1, // 1-based indexing in DB
-            option.explanation
           ]);
         }
       }
-      
+
       await client.query('COMMIT');
-      
+
       // Return the created question
       return await this.getQuestionById(questionId);
       
@@ -1087,18 +1097,18 @@ async getRandomQuestions(count, filters = {}) {
     try {
       await client.query('BEGIN');
       
-      // Update question
+      // Update question (current schema: difficulty/points; no
+      // expected_answers_count column).
       await client.query(`
-        UPDATE questions 
-        SET question_text = $1, explanation = $2, difficulty_level = $3,
-            expected_answers_count = $4, points = $5, updated_at = CURRENT_TIMESTAMP
-        WHERE id = $6
+        UPDATE questions
+        SET question_text = $1, explanation = $2, difficulty = $3::"Difficulty",
+            points = $4, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $5
       `, [
         updateData.text,
         updateData.explanation,
-        updateData.difficulty,
-        updateData.expectedAnswers,
-        updateData.points,
+        (updateData.difficulty || 'medium').toLowerCase(),
+        updateData.points || 1,
         id
       ]);
       
@@ -1114,15 +1124,14 @@ async getRandomQuestions(count, filters = {}) {
           
           await client.query(`
             INSERT INTO question_options (
-              question_id, option_label, option_text, is_correct, order_index, explanation
-            ) VALUES ($1, $2, $3, $4, $5, $6)
+              question_id, option_label, option_text, is_correct, order_index
+            ) VALUES ($1, $2, $3, $4, $5)
           `, [
             id,
             option.label || String.fromCharCode(65 + i),
             option.text,
             isCorrect,
             i + 1,
-            option.explanation
           ]);
         }
       }

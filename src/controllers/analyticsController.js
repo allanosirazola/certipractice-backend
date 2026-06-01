@@ -23,8 +23,7 @@ const getUserProgress = async (req, res) => {
         COUNT(DISTINCT ua.question_id) as unique_questions_attempted,
         COUNT(DISTINCT CASE WHEN ua.is_correct = true THEN ua.question_id END) as unique_questions_correct
       FROM exams e
-      LEFT JOIN exam_questions eq ON e.id = eq.exam_id
-      LEFT JOIN user_answers ua ON eq.id = ua.exam_question_id
+      LEFT JOIN exam_answers ua ON ua.exam_id = e.id
       WHERE e.user_id = $1
     `;
 
@@ -46,8 +45,7 @@ const getUserProgress = async (req, res) => {
       FROM exams e
       JOIN certifications c ON e.certification_id = c.id
       JOIN providers p ON c.provider_id = p.id
-      LEFT JOIN exam_questions eq ON e.id = eq.exam_id
-      LEFT JOIN user_answers ua ON eq.id = ua.exam_question_id
+      LEFT JOIN exam_answers ua ON ua.exam_id = e.id
       WHERE e.user_id = $1
       GROUP BY c.id, c.name, p.name
       ORDER BY completed_exams DESC
@@ -179,26 +177,24 @@ const getUserStats = async (req, res) => {
         ) dates) as days_active_last_30
         
       FROM exams e
-      LEFT JOIN exam_questions eq ON e.id = eq.exam_id
-      LEFT JOIN user_answers ua ON eq.id = ua.exam_question_id
+      LEFT JOIN exam_answers ua ON ua.exam_id = e.id
       WHERE e.user_id = $1
     `;
 
     // Stats by difficulty
     const difficultyQuery = `
       SELECT 
-        q.difficulty_level as difficulty,
+        q.difficulty as difficulty,
         COUNT(ua.id) as total_attempts,
         SUM(CASE WHEN ua.is_correct THEN 1 ELSE 0 END) as correct,
         ROUND(AVG(CASE WHEN ua.is_correct THEN 100.0 ELSE 0.0 END), 1) as accuracy
-      FROM user_answers ua
-      JOIN exam_questions eq ON ua.exam_question_id = eq.id
-      JOIN questions q ON eq.question_id = q.id
-      JOIN exams e ON eq.exam_id = e.id
+      FROM exam_answers ua
+      JOIN questions q ON ua.question_id = q.id
+      JOIN exams e ON ua.exam_id = e.id
       WHERE e.user_id = $1
-      GROUP BY q.difficulty_level
+      GROUP BY q.difficulty
       ORDER BY 
-        CASE q.difficulty_level 
+        CASE q.difficulty 
           WHEN 'easy' THEN 1 
           WHEN 'medium' THEN 2 
           WHEN 'hard' THEN 3 
@@ -214,12 +210,11 @@ const getUserStats = async (req, res) => {
         COUNT(ua.id) as total_attempts,
         SUM(CASE WHEN ua.is_correct THEN 1 ELSE 0 END) as correct,
         ROUND(AVG(CASE WHEN ua.is_correct THEN 100.0 ELSE 0.0 END), 1) as accuracy
-      FROM user_answers ua
-      JOIN exam_questions eq ON ua.exam_question_id = eq.id
-      JOIN questions q ON eq.question_id = q.id
+      FROM exam_answers ua
+      JOIN questions q ON ua.question_id = q.id
       JOIN topics t ON q.topic_id = t.id
       JOIN certifications c ON t.certification_id = c.id
-      JOIN exams e ON eq.exam_id = e.id
+      JOIN exams e ON ua.exam_id = e.id
       WHERE e.user_id = $1
       GROUP BY t.id, t.name, c.name
       ORDER BY accuracy ASC
@@ -300,13 +295,12 @@ const getRecommendations = async (req, res) => {
         SUM(CASE WHEN ua.is_correct THEN 1 ELSE 0 END) as correct,
         ROUND(AVG(CASE WHEN ua.is_correct THEN 100.0 ELSE 0.0 END), 1) as accuracy,
         (SELECT COUNT(*) FROM questions q2 WHERE q2.topic_id = t.id AND q2.is_active = true) as available_questions
-      FROM user_answers ua
-      JOIN exam_questions eq ON ua.exam_question_id = eq.id
-      JOIN questions q ON eq.question_id = q.id
+      FROM exam_answers ua
+      JOIN questions q ON ua.question_id = q.id
       JOIN topics t ON q.topic_id = t.id
       JOIN certifications c ON t.certification_id = c.id
       JOIN providers p ON c.provider_id = p.id
-      JOIN exams e ON eq.exam_id = e.id
+      JOIN exams e ON ua.exam_id = e.id
       WHERE e.user_id = $1
       GROUP BY t.id, t.name, c.id, c.name, p.name
       HAVING COUNT(ua.id) >= 3
@@ -329,10 +323,9 @@ const getRecommendations = async (req, res) => {
       )
       AND t.id NOT IN (
         SELECT DISTINCT q.topic_id
-        FROM user_answers ua
-        JOIN exam_questions eq ON ua.exam_question_id = eq.id
-        JOIN questions q ON eq.question_id = q.id
-        JOIN exams e ON eq.exam_id = e.id
+        FROM exam_answers ua
+        JOIN questions q ON ua.question_id = q.id
+        JOIN exams e ON ua.exam_id = e.id
         WHERE e.user_id = $1
       )
       AND t.is_active = true
@@ -344,19 +337,18 @@ const getRecommendations = async (req, res) => {
       SELECT 
         q.id as question_id,
         LEFT(q.question_text, 100) as question_preview,
-        q.difficulty_level as difficulty,
+        q.difficulty as difficulty,
         t.name as topic_name,
         COUNT(ua.id) as failed_count,
         MAX(ua.answered_at) as last_failed
-      FROM user_answers ua
-      JOIN exam_questions eq ON ua.exam_question_id = eq.id
-      JOIN questions q ON eq.question_id = q.id
+      FROM exam_answers ua
+      JOIN questions q ON ua.question_id = q.id
       JOIN topics t ON q.topic_id = t.id
-      JOIN exams e ON eq.exam_id = e.id
+      JOIN exams e ON ua.exam_id = e.id
       WHERE e.user_id = $1 
         AND ua.is_correct = false
         AND q.is_active = true
-      GROUP BY q.id, q.question_text, q.difficulty_level, t.name
+      GROUP BY q.id, q.question_text, q.difficulty, t.name
       HAVING COUNT(ua.id) >= 2
       ORDER BY failed_count DESC, last_failed DESC
       LIMIT 10
@@ -482,16 +474,18 @@ const trackActivity = async (req, res) => {
       });
     }
 
-    // Log activity (could be stored in a separate analytics table)
+    // Log activity into audit_logs (real schema: entity_id required, payload
+    // goes in new_values; there is no `metadata` column).
     const query = `
-      INSERT INTO audit_log (user_id, action, entity_type, metadata, ip_address, user_agent, created_at)
-      VALUES ($1, $2, 'activity', $3, $4, $5, NOW())
+      INSERT INTO audit_logs (user_id, action, entity_type, entity_id, new_values, ip_address, user_agent, created_at)
+      VALUES ($1, $2, 'activity', $3, $4, $5, $6, NOW())
       RETURNING id
     `;
 
     const result = await pool.query(query, [
       userId || null,
       activityType,
+      sessionId || 'anonymous',
       JSON.stringify({ ...metadata, sessionId }),
       req.ip,
       req.headers['user-agent']

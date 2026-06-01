@@ -210,7 +210,7 @@ async function _loadQuestions(ids) {
                   'id',        o.id,
                   'text',      o.option_text,
                   'isCorrect', o.is_correct
-                ) ORDER BY o.option_order
+                ) ORDER BY o.order_index
               ) FILTER (WHERE o.id IS NOT NULL),
               '[]'::json
             ) AS options
