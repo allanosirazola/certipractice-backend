@@ -389,6 +389,43 @@ class Question {
   }
 
   /**
+   * Full representation including correct answers + explanation. Used by admin
+   * and by practice-mode verification. Alias over toJSON(true).
+   * @returns {Object}
+   */
+  getComplete() {
+    return this.toJSON(true);
+  }
+
+  /**
+   * Public representation WITHOUT correct answers / explanation. Safe to send
+   * before the user has answered. Alias over toJSON(false).
+   * @returns {Object}
+   */
+  getSanitized() {
+    return this.toJSON(false);
+  }
+
+  /**
+   * Lightweight metadata (no answer content).
+   * @returns {Object}
+   */
+  getMetadata() {
+    return {
+      id: this.id,
+      difficulty: this.difficulty,
+      points: this.points,
+      questionType: this.questionType,
+      isMultipleChoice: this.isMultipleChoice,
+      topicName: this.topicName,
+      certificationName: this.certificationName,
+      certificationCode: this.certificationCode,
+      providerName: this.providerName,
+      optionCount: Array.isArray(this.options) ? this.options.length : 0,
+    };
+  }
+
+  /**
    * Create a deep clone of this question
    * @returns {Question}
    */
