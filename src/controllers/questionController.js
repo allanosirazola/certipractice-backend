@@ -66,9 +66,10 @@ const getQuestionById = async (req, res) => {
   try {
     const { id } = req.params;
     const { includeAnswers = 'false', includeStats = 'false' } = req.query;
-    
-    // Validate ID
-    if (!id || isNaN(parseInt(id))) {
+
+    // Question IDs are UUIDs — never coerce with parseInt (that turned valid
+    // UUIDs into NaN/0 and broke the practice-mode "explanation" lookup).
+    if (!id || typeof id !== 'string' || id.trim() === '') {
       return res.status(400).json({
         success: false,
         error: 'Invalid question ID'
@@ -76,7 +77,7 @@ const getQuestionById = async (req, res) => {
     }
 
     const shouldIncludeStats = includeStats === 'true' && req.user && req.user.isAdmin;
-    const question = await QuestionService.getQuestionById(parseInt(id), shouldIncludeStats);
+    const question = await QuestionService.getQuestionById(id, shouldIncludeStats);
 
     if (!question) {
       return res.status(404).json({
@@ -175,7 +176,7 @@ const updateQuestion = async (req, res) => {
     const { id } = req.params;
     
     // Validate ID
-    if (!id || isNaN(parseInt(id))) {
+    if (!id || typeof id !== 'string' || id.trim() === '') {
       return res.status(400).json({
         success: false,
         error: 'Invalid question ID'
@@ -183,7 +184,7 @@ const updateQuestion = async (req, res) => {
     }
 
     // Check if question exists
-    const existingQuestion = await QuestionService.getQuestionById(parseInt(id));
+    const existingQuestion = await QuestionService.getQuestionById(id);
     if (!existingQuestion) {
       return res.status(404).json({
         success: false,
@@ -213,7 +214,7 @@ const updateQuestion = async (req, res) => {
       }
     }
 
-    const question = await QuestionService.updateQuestion(parseInt(id), req.body);
+    const question = await QuestionService.updateQuestion(id, req.body);
     
     res.json({
       success: true,
@@ -235,7 +236,7 @@ const deleteQuestion = async (req, res) => {
     const { id } = req.params;
     
     // Validate ID
-    if (!id || isNaN(parseInt(id))) {
+    if (!id || typeof id !== 'string' || id.trim() === '') {
       return res.status(400).json({
         success: false,
         error: 'Invalid question ID'
@@ -243,7 +244,7 @@ const deleteQuestion = async (req, res) => {
     }
 
     // Check if question exists
-    const existingQuestion = await QuestionService.getQuestionById(parseInt(id));
+    const existingQuestion = await QuestionService.getQuestionById(id);
     if (!existingQuestion) {
       return res.status(404).json({
         success: false,
@@ -251,7 +252,7 @@ const deleteQuestion = async (req, res) => {
       });
     }
 
-    await QuestionService.deleteQuestion(parseInt(id));
+    await QuestionService.deleteQuestion(id);
     
     res.json({
       success: true,
@@ -433,7 +434,7 @@ const checkAnswer = async (req, res) => {
     const { answer, timeSpent } = req.body;
 
     // Validate ID
-    if (!id || isNaN(parseInt(id))) {
+    if (!id || typeof id !== 'string' || id.trim() === '') {
       return res.status(400).json({
         success: false,
         error: 'Invalid question ID'
@@ -447,7 +448,7 @@ const checkAnswer = async (req, res) => {
       });
     }
 
-    const question = await QuestionService.getQuestionById(parseInt(id), true);
+    const question = await QuestionService.getQuestionById(id, true);
     
     if (!question) {
       return res.status(404).json({
@@ -460,12 +461,12 @@ const checkAnswer = async (req, res) => {
     
     // Update question statistics if timeSpent is provided
     if (timeSpent && timeSpent > 0) {
-      await QuestionService.updateQuestionStats(parseInt(id), isCorrect, timeSpent);
+      await QuestionService.updateQuestionStats(id, isCorrect, timeSpent);
     }
     
     // Return result with explanation if correct, or just correctness if wrong
     const response = {
-      questionId: parseInt(id),
+      questionId: id,
       isCorrect: isCorrect,
       points: isCorrect ? question.points : 0
     };
@@ -505,14 +506,14 @@ const getQuestionMetadata = async (req, res) => {
     const { id } = req.params;
     
     // Validate ID
-    if (!id || isNaN(parseInt(id))) {
+    if (!id || typeof id !== 'string' || id.trim() === '') {
       return res.status(400).json({
         success: false,
         error: 'Invalid question ID'
       });
     }
 
-    const question = await QuestionService.getQuestionById(parseInt(id));
+    const question = await QuestionService.getQuestionById(id);
 
     if (!question) {
       return res.status(404).json({
@@ -620,14 +621,14 @@ const approveQuestion = async (req, res) => {
   try {
     const { id } = req.params;
     
-    if (!id || isNaN(parseInt(id))) {
+    if (!id || typeof id !== 'string' || id.trim() === '') {
       return res.status(400).json({
         success: false,
         error: 'Invalid question ID'
       });
     }
 
-    await QuestionService.approveQuestion(parseInt(id), req.user.id);
+    await QuestionService.approveQuestion(id, req.user.id);
     
     res.json({
       success: true,
@@ -647,7 +648,7 @@ const rejectQuestion = async (req, res) => {
     const { id } = req.params;
     const { reason } = req.body;
     
-    if (!id || isNaN(parseInt(id))) {
+    if (!id || typeof id !== 'string' || id.trim() === '') {
       return res.status(400).json({
         success: false,
         error: 'Invalid question ID'
@@ -661,7 +662,7 @@ const rejectQuestion = async (req, res) => {
       });
     }
 
-    await QuestionService.rejectQuestion(parseInt(id), req.user.id, reason);
+    await QuestionService.rejectQuestion(id, req.user.id, reason);
     
     res.json({
       success: true,

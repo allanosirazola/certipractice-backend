@@ -84,7 +84,7 @@ app.use(cors({
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Session-ID', 'X-Request-ID'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Session-ID', 'X-Request-ID', 'X-Include-Answers'],
   exposedHeaders: ['X-Session-Id', 'X-New-Token', 'X-Total-Count'],
 }));
 
